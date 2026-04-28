@@ -1,0 +1,180 @@
+export type AppLocale = 'en' | 'es' | 'zh';
+
+export type AppMessages = {
+  languages: Record<AppLocale, string>;
+  overlays: {
+    generic: string;
+    video: string;
+    subtitle: string;
+  };
+  notices: {
+    welcome: string;
+    videoDetected: (fileName: string) => string;
+    videoLoaded: (fileName: string) => string;
+    diskReadFailed: (fileName: string) => string;
+    inspectorOpened: (selector: string) => string;
+    inspectorUnavailable: string;
+    cssFontRemoved: string;
+    cssFontReady: (familyName: string) => string;
+    cssFontLoaded: string;
+    cssFontDisabled: string;
+    installedFontApplied: (familyName: string) => string;
+    cssFontApplied: (familyName: string) => string;
+    subtitleProcessing: (fileName: string) => string;
+    subtitleLoaded: (fileName: string) => string;
+    subtitleLoadFailed: string;
+    openVideoFirst: string;
+    unsupportedFile: string;
+    subtitleCleared: string;
+    noPreviousCue: string;
+    noNextCue: string;
+    previousCueAligned: string;
+    nextCueAligned: string;
+    exportSaved: (offsetValue: string, savedPath: string) => string;
+    exportReady: (offsetValue: string) => string;
+    restoreRemoteFontFailed: string;
+    remoteFontLoadFailed: string;
+    videoReadyPrompt: (fileName: string) => string;
+    videoReadyPlaying: (fileName: string) => string;
+    videoReadyPaused: (fileName: string) => string;
+    languageChanged: (languageName: string) => string;
+    embeddedSubtitleSelected: (trackName: string) => string;
+    embeddedSubtitleMissing: string;
+    embeddedSubtitleLoading: (trackName: string) => string;
+  };
+  toasts: {
+    subtitleSaved: (savedPath: string) => string;
+    subtitleSavedFallback: string;
+  };
+  header: {
+    eyebrow: string;
+    openVideo: string;
+    inspect: string;
+    language: string;
+  };
+  hero: {
+    eyebrow: string;
+    title: string;
+    copy: string;
+    selectVideo: string;
+    openDevtools: string;
+    dropTitle: string;
+    dropHint: string;
+  };
+  stage: {
+    video: string;
+    subtitles: string;
+    noneLoaded: string;
+    offset: string;
+    changeVideo: string;
+    loadSubtitles: string;
+  };
+  dock: {
+    subtitles: string;
+    settings: string;
+    devTools: string;
+  };
+  panel: {
+    loadTab: string;
+    styleTab: string;
+    close: string;
+    autoEyebrow: string;
+    loadTitle: string;
+    loadedFile: (fileName: string) => string;
+    emptyDrop: string;
+    cuesReady: (cueCount: number) => string;
+    dropHint: string;
+    selectSubtitle: string;
+    processing: string;
+    removeSubtitle: string;
+    embeddedTitle: string;
+    embeddedEmpty: string;
+    useEmbedded: string;
+    currentEmbedded: string;
+    audioTitle: string;
+    audioEmpty: string;
+    currentAudio: string;
+  };
+  behavior: {
+    title: string;
+    language: string;
+    promptForSubtitles: string;
+    promptForSubtitlesHelp: string;
+    openFullscreen: string;
+    openFullscreenHelp: string;
+    openPanel: string;
+    openPanelHelp: string;
+    autoplay: string;
+    autoplayHelp: string;
+  };
+  sync: {
+    title: string;
+    offset: string;
+    rememberOffset: string;
+    rememberOffsetHelp: string;
+    reset: string;
+    shiftMinusHalf: string;
+    shiftMinusTenth: string;
+    shiftPlusTenth: string;
+    shiftPlusHalf: string;
+    previousHere: string;
+    nextHere: string;
+    download: string;
+    advanced: string;
+  };
+  font: {
+    title: string;
+    cssLoaded: string;
+    noCss: string;
+    cssUrl: string;
+    cssPlaceholder: string;
+    loadCss: string;
+    cssHelper: string;
+    installed: string;
+    installedHelper: string;
+    sample: string;
+    searchPlaceholder: string;
+    previousPage: string;
+    nextPage: string;
+    pageSummary: (currentPage: number, totalPages: number) => string;
+    resultsSummary: (visibleCount: number, totalCount: number) => string;
+    noResults: string;
+  };
+  style: {
+    title: string;
+    preset: string;
+    size: string;
+    position: string;
+    color: string;
+    background: string;
+    opacity: string;
+    weight: string;
+    width: string;
+    customWidth: string;
+    widthValue: string;
+    shadow: string;
+    restoreDefault: string;
+  };
+  advanced: {
+    title: string;
+    show: string;
+    hide: string;
+    lineHeight: string;
+    letterSpacing: string;
+    paddingX: string;
+    paddingY: string;
+    radius: string;
+  };
+  footer: {
+    hint: string;
+  };
+  misc: {
+    enabled: string;
+    disabled: string;
+  };
+  errors: {
+    invalidTimestamp: (rawValue: string) => string;
+    zipMissing: string;
+    noValidCues: string;
+  };
+};
