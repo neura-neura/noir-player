@@ -919,14 +919,42 @@ input[type='color'] {
   font-size: var(--subtitle-font-size);
   font-weight: var(--subtitle-font-weight);
   font-family: var(--subtitle-font-family);
+  font-optical-sizing: auto;
+  font-synthesis-weight: auto;
+  font-variation-settings: 'wght' var(--subtitle-font-weight);
   line-height: var(--subtitle-line-height);
   letter-spacing: var(--subtitle-letter-spacing);
   padding: var(--subtitle-padding-y) var(--subtitle-padding-x);
   border-radius: var(--subtitle-radius);
   text-shadow: var(--subtitle-shadow);
+  text-rendering: geometricPrecision;
   user-select: text;
   white-space: pre-wrap;
   pointer-events: auto;
+}
+
+.caption-text *,
+.caption-text i,
+.caption-text em,
+.caption-text u,
+.caption-text font {
+  font-family: inherit;
+  font-size: inherit;
+  font-optical-sizing: inherit;
+  font-synthesis-weight: inherit;
+  font-variation-settings: inherit;
+  line-height: inherit;
+  letter-spacing: inherit;
+  text-shadow: inherit;
+}
+
+.caption-text i,
+.caption-text em {
+  display: inline-block;
+  font-style: normal;
+  font-weight: var(--subtitle-font-weight);
+  transform: skewX(-12deg);
+  transform-origin: center;
 }
 
 .toast-notice {

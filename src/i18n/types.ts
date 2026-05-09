@@ -11,6 +11,9 @@ export type AppMessages = {
     welcome: string;
     videoDetected: (fileName: string) => string;
     videoLoaded: (fileName: string) => string;
+    videoPreparing: (fileName: string) => string;
+    transportStreamNeedsPath: (fileName: string) => string;
+    hlsPlaybackFailed: string;
     diskReadFailed: (fileName: string) => string;
     inspectorOpened: (selector: string) => string;
     inspectorUnavailable: string;

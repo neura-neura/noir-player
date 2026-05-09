@@ -170,34 +170,6 @@ Examples:
 - `Noir Player_0.1.0_x64-setup.exe`
 - `Noir Player_0.1.0_x64_en-US.msi`
 
-## GitHub Release Build
-
-The public GitHub repository does not store `ffmpeg.exe` and `ffprobe.exe` directly because those binaries are too large for normal Git history.
-
-To generate the same kind of self-contained installer that is uploaded to GitHub Releases:
-
-1. Install `ffmpeg` and `ffprobe` on Windows and make sure both are available in `PATH`
-2. Run the staging script:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/stage-ffmpeg.ps1
-```
-
-3. Build the release installer:
-
-```bash
-npm run tauri build
-```
-
-4. Collect the generated artifacts from:
-
-```text
-src-tauri/target/release/bundle/nsis/
-src-tauri/target/release/bundle/msi/
-```
-
-That process produces a Windows installer with bundled FFmpeg tools, which is the recommended release format for end users.
-
 ## How to Use
 
 ### Open a video

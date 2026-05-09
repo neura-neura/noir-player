@@ -5,6 +5,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import DOMPurify from 'dompurify';
+import Hls from 'hls.js';
 import Plyr from 'plyr';
 import 'plyr/dist/plyr.css';
 import {
@@ -27,7 +28,7 @@ import {
 type VideoSource = {
   src: string;
   fileName: string;
-  kind: 'object' | 'path';
+  kind: 'object' | 'path' | 'hls';
   path?: string;
 };
 
@@ -53,6 +54,11 @@ type SubtitleStyle = {
 
 type OpenFilePayload = {
   path: string;
+};
+
+type TsStreamSource = {
+  playlistUrl: string;
+  durationSeconds: number;
 };
 
 type ToastState = {
@@ -108,6 +114,8 @@ const VIDEO_EXTENSIONS = [
 const SUBTITLE_EXTENSIONS = ['srt', 'vtt', 'zip'];
 const APP_NAME = 'Noir Player';
 const STYLE_STORAGE_KEY = 'noir-web-player:subtitle-style';
+const STYLE_PRESET_VERSION_STORAGE_KEY =
+  'noir-web-player:subtitle-style-preset-version';
 const SYNC_STORAGE_KEY = 'noir-web-player:subtitle-sync';
 const REMEMBER_SYNC_STORAGE_KEY = 'noir-web-player:remember-sync';
 const PROMPT_SUBTITLES_STORAGE_KEY = 'noir-web-player:prompt-subtitles';
@@ -126,6 +134,12 @@ const DEFAULT_FONT_STYLESHEET_URL = '/vendor/gotham-pro-font/fonts.min.css';
 const FONT_STYLESHEET_LINK_ID = 'subtitle-font-stylesheet';
 const TOAST_DURATION_MS = 3_600;
 const INJECTED_SUBTITLE_TRACK_PREFIX = '__noir-player-track__';
+const REJECTED_STYLUS_PRESET_VERSION = 'gotham-stylus-v1';
+const CURRENT_STYLE_PRESET_VERSION = 'gotham-classic-v1';
+
+const LEGACY_INTER_DEFAULT_FONT_FAMILY =
+  "'Inter Variable', 'Inter', 'Segoe UI Variable Text', 'Segoe UI', sans-serif";
+const DEFAULT_SUBTITLE_FONT_FAMILY = 'GothamPro, sans-serif';
 
 const DEFAULT_STYLE: SubtitleStyle = {
   fontSize: 38,
@@ -134,7 +148,7 @@ const DEFAULT_STYLE: SubtitleStyle = {
   backgroundOpacity: 0.23,
   bottomOffset: 4,
   fontWeight: 500,
-  fontFamily: 'GothamPro, sans-serif',
+  fontFamily: DEFAULT_SUBTITLE_FONT_FAMILY,
   useCustomMaxWidth: false,
   maxWidth: 78,
   paddingX: 12,
@@ -149,8 +163,17 @@ function getBaseName(path: string): string {
   return path.split(/[\\/]/).pop() || path;
 }
 
+function getFileExtension(fileName: string): string {
+  const parts = fileName.split('.');
+  return parts.length > 1 ? parts.pop()!.toLowerCase() : '';
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function isTransportStreamFileName(fileName: string): boolean {
+  return ['ts', 'm2ts'].includes(getFileExtension(fileName));
 }
 
 function isCodecLikelyUnsupported(codec: string): boolean {
@@ -184,6 +207,40 @@ function hexToRgbTuple(hexColor: string): string {
   return `${red} ${green} ${blue}`;
 }
 
+function restoreClassicDefaultStyle(
+  style: SubtitleStyle,
+  parsed: Partial<SubtitleStyle>,
+): SubtitleStyle {
+  const storedPresetVersion = window.localStorage.getItem(
+    STYLE_PRESET_VERSION_STORAGE_KEY,
+  );
+  if (storedPresetVersion !== REJECTED_STYLUS_PRESET_VERSION) {
+    return style;
+  }
+
+  const hasRejectedDefaultLayout =
+    parsed.backgroundOpacity === 0 &&
+    parsed.paddingX === 0 &&
+    parsed.paddingY === 0 &&
+    parsed.borderRadius === 0 &&
+    parsed.lineHeight === 1.5 &&
+    parsed.letterSpacing === 0;
+
+  if (!hasRejectedDefaultLayout) {
+    return style;
+  }
+
+  return {
+    ...style,
+    backgroundOpacity: DEFAULT_STYLE.backgroundOpacity,
+    paddingX: DEFAULT_STYLE.paddingX,
+    paddingY: DEFAULT_STYLE.paddingY,
+    borderRadius: DEFAULT_STYLE.borderRadius,
+    lineHeight: DEFAULT_STYLE.lineHeight,
+    letterSpacing: DEFAULT_STYLE.letterSpacing,
+  };
+}
+
 function readStoredStyle(): SubtitleStyle {
   try {
     const rawValue = window.localStorage.getItem(STYLE_STORAGE_KEY);
@@ -192,10 +249,15 @@ function readStoredStyle(): SubtitleStyle {
     }
 
     const parsed = JSON.parse(rawValue) as Partial<SubtitleStyle>;
-    return {
+    const nextStyle = {
       ...DEFAULT_STYLE,
       ...parsed,
     };
+    if (nextStyle.fontFamily === LEGACY_INTER_DEFAULT_FONT_FAMILY) {
+      nextStyle.fontFamily = DEFAULT_STYLE.fontFamily;
+    }
+
+    return restoreClassicDefaultStyle(nextStyle, parsed);
   } catch {
     return DEFAULT_STYLE;
   }
@@ -230,9 +292,11 @@ function readStoredLocale(): AppLocale {
 
 function readStoredFontStylesheetUrl(): string {
   try {
-    const storedValue =
-      window.localStorage.getItem(FONT_STYLESHEET_STORAGE_KEY) ||
-      DEFAULT_FONT_STYLESHEET_URL;
+    const storedValue = window.localStorage.getItem(FONT_STYLESHEET_STORAGE_KEY);
+    if (storedValue === null) {
+      return DEFAULT_FONT_STYLESHEET_URL;
+    }
+
     return storedValue === LEGACY_DEFAULT_FONT_STYLESHEET_URL
       ? DEFAULT_FONT_STYLESHEET_URL
       : storedValue;
@@ -243,9 +307,13 @@ function readStoredFontStylesheetUrl(): string {
 
 function readStoredFontStylesheetInput(): string {
   try {
-    const storedValue =
-      window.localStorage.getItem(FONT_STYLESHEET_INPUT_STORAGE_KEY) ||
-      readStoredFontStylesheetUrl();
+    const storedValue = window.localStorage.getItem(
+      FONT_STYLESHEET_INPUT_STORAGE_KEY,
+    );
+    if (storedValue === null) {
+      return readStoredFontStylesheetUrl();
+    }
+
     return storedValue === LEGACY_DEFAULT_FONT_STYLESHEET_URL
       ? DEFAULT_FONT_STYLESHEET_URL
       : storedValue;
@@ -686,6 +754,7 @@ export default function App() {
   const subtitleDropZoneRef = useRef<HTMLDivElement | null>(null);
   const advancedSectionRef = useRef<HTMLDivElement | null>(null);
   const playerRef = useRef<Plyr | null>(null);
+  const hlsRef = useRef<Hls | null>(null);
   const webAudioRef = useRef<WebAudioRefs | null>(null);
   const pageDragDepthRef = useRef(0);
   const heroDropDepthRef = useRef(0);
@@ -735,7 +804,7 @@ export default function App() {
     '--subtitle-line-height': String(subtitleStyle.lineHeight),
     '--subtitle-letter-spacing': `${subtitleStyle.letterSpacing}px`,
     '--subtitle-shadow': subtitleStyle.textShadow
-      ? '0 0 7px #000000'
+      ? 'rgb(0 0 0) 0 0 7px, rgb(0 0 0 / 0.8) 0 0 18px'
       : 'none',
   } as CSSProperties;
   const playerFrameStyle = videoAspectRatio
@@ -764,19 +833,58 @@ export default function App() {
     setNotice(nextNotice);
   }
 
-  function openVideoFromPath(path: string) {
-    resetForNewVideo(
-      {
-        src: convertFileSrc(path),
-        fileName: getBaseName(path),
-        kind: 'path',
-        path,
-      },
-      messages.notices.videoDetected(getBaseName(path)),
-    );
+  async function openVideoFromPath(path: string) {
+    const fileName = getBaseName(path);
+
+    try {
+      let playbackPath = path;
+      if (isTransportStreamFileName(fileName)) {
+        setNotice(messages.notices.videoPreparing(fileName));
+        const streamSource = await invoke<TsStreamSource>('prepare_ts_hls_stream', {
+          path,
+        });
+        resetForNewVideo(
+          {
+            src: streamSource.playlistUrl,
+            fileName,
+            kind: 'hls',
+            path,
+          },
+          messages.notices.videoDetected(fileName),
+        );
+        return;
+      }
+
+      resetForNewVideo(
+        {
+          src: convertFileSrc(playbackPath),
+          fileName,
+          kind: 'path',
+          path,
+        },
+        messages.notices.videoDetected(fileName),
+      );
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? error.message
+          : messages.notices.diskReadFailed(fileName),
+      );
+    }
   }
 
   function openVideoFromFile(file: File) {
+    const nativePath = (file as File & { path?: string }).path;
+    if (nativePath && isTransportStreamFileName(file.name)) {
+      void openVideoFromPath(nativePath);
+      return;
+    }
+
+    if (isTransportStreamFileName(file.name)) {
+      setNotice(messages.notices.transportStreamNeedsPath(file.name));
+      return;
+    }
+
     resetForNewVideo(
       {
         src: URL.createObjectURL(file),
@@ -1437,7 +1545,7 @@ export default function App() {
   async function handleDroppedPath(path: string) {
     try {
       if (isVideoFileName(path)) {
-        openVideoFromPath(path);
+        await openVideoFromPath(path);
         return;
       }
 
@@ -1575,7 +1683,7 @@ export default function App() {
       });
 
       if (typeof selectedPath === 'string') {
-        openVideoFromPath(selectedPath);
+        await openVideoFromPath(selectedPath);
         return;
       }
     } catch {
@@ -1769,6 +1877,8 @@ export default function App() {
 
   useEffect(() => {
     return () => {
+      hlsRef.current?.destroy();
+      hlsRef.current = null;
       playerRef.current?.destroy();
       playerRef.current = null;
       if (webAudioRef.current) {
@@ -1895,6 +2005,10 @@ export default function App() {
     window.localStorage.setItem(
       STYLE_STORAGE_KEY,
       JSON.stringify(subtitleStyle),
+    );
+    window.localStorage.setItem(
+      STYLE_PRESET_VERSION_STORAGE_KEY,
+      CURRENT_STYLE_PRESET_VERSION,
     );
   }, [subtitleStyle]);
 
@@ -2028,12 +2142,19 @@ export default function App() {
     refreshEmbeddedSubtitleTracks();
     if (videoSource.path) {
       void refreshMediaSubtitleTracks(videoSource.path);
-      void refreshAudioTracks(videoSource.path);
+      if (videoSource.kind !== 'hls') {
+        void refreshAudioTracks(videoSource.path);
+      }
     }
   }, [language, videoSource]);
 
   useEffect(() => {
-    if (!videoSource?.path || nativeAudioTracks.length === 0 || externalAudioSource) {
+    if (
+      !videoSource?.path ||
+      videoSource.kind === 'hls' ||
+      nativeAudioTracks.length === 0 ||
+      externalAudioSource
+    ) {
       return;
     }
 
@@ -2053,10 +2174,14 @@ export default function App() {
 
     autoPreparedAudioKeyRef.current = fallbackKey;
     void selectAudioTrack(firstTrack, videoSource.path);
-  }, [externalAudioSource, nativeAudioTracks, videoSource?.path]);
+  }, [externalAudioSource, nativeAudioTracks, videoSource]);
 
   useEffect(() => {
-    if (!videoSource?.path || nativeAudioTracks.length === 0) {
+    if (
+      !videoSource?.path ||
+      videoSource.kind === 'hls' ||
+      nativeAudioTracks.length === 0
+    ) {
       return;
     }
 
@@ -2075,7 +2200,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [nativeAudioTracks, videoSource?.path]);
+  }, [nativeAudioTracks, videoSource]);
 
   useEffect(() => {
     if (!fontStylesheetUrl) {
@@ -2098,7 +2223,7 @@ export default function App() {
       try {
         const initialPath = await invoke<string | null>('get_launch_video');
         if (active && initialPath) {
-          openVideoFromPath(initialPath);
+          void openVideoFromPath(initialPath);
         }
       } catch {
         // Browser preview is fine without the desktop bridge.
@@ -2106,7 +2231,7 @@ export default function App() {
 
       try {
         unlistenPromise = listen<OpenFilePayload>('open-file', (event) => {
-          openVideoFromPath(event.payload.path);
+          void openVideoFromPath(event.payload.path);
         });
       } catch {
         // Ignore when running in a plain browser.
@@ -2232,6 +2357,69 @@ export default function App() {
 
   useEffect(() => {
     const videoElement = videoElementRef.current;
+    if (!videoElement || !videoSource) {
+      return;
+    }
+
+    hlsRef.current?.destroy();
+    hlsRef.current = null;
+
+    if (videoSource.kind !== 'hls') {
+      return;
+    }
+
+    videoElement.removeAttribute('src');
+    videoElement.load();
+
+    if (Hls.isSupported()) {
+      const hls = new Hls({
+        backBufferLength: 20,
+        maxBufferLength: 40,
+        maxMaxBufferLength: 70,
+        startFragPrefetch: true,
+      });
+      hlsRef.current = hls;
+      hls.attachMedia(videoElement);
+      hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+        hls.loadSource(videoSource.src);
+      });
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (!data.fatal) {
+          return;
+        }
+
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          hls.startLoad();
+          return;
+        }
+
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          hls.recoverMediaError();
+          return;
+        }
+
+        setNotice(messages.notices.hlsPlaybackFailed);
+      });
+
+      return () => {
+        hls.destroy();
+        if (hlsRef.current === hls) {
+          hlsRef.current = null;
+        }
+      };
+    }
+
+    if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
+      videoElement.src = videoSource.src;
+      videoElement.load();
+      return;
+    }
+
+    setNotice(messages.notices.hlsPlaybackFailed);
+  }, [messages, videoSource]);
+
+  useEffect(() => {
+    const videoElement = videoElementRef.current;
     if (!videoElement) {
       return;
     }
@@ -2266,7 +2454,9 @@ export default function App() {
       refreshEmbeddedSubtitleTracks();
       if (videoSource?.path) {
         void refreshMediaSubtitleTracks(videoSource.path);
-        void refreshAudioTracks(videoSource.path);
+        if (videoSource.kind !== 'hls') {
+          void refreshAudioTracks(videoSource.path);
+        }
       }
       retryTimers.push(
         window.setTimeout(refreshEmbeddedSubtitleTracks, 180),
@@ -2576,7 +2766,7 @@ export default function App() {
                   key={videoSource.src}
                   ref={videoElementRef}
                   className='player-video'
-                  src={videoSource.src}
+                  src={videoSource.kind === 'hls' ? undefined : videoSource.src}
                   preload='auto'
                   playsInline
                 />
@@ -3354,9 +3544,9 @@ export default function App() {
                           <div className='settings-item-content slider-editor'>
                             <input
                               type='range'
-                              min={300}
+                              min={100}
                               max={900}
-                              step={100}
+                              step={10}
                               value={subtitleStyle.fontWeight}
                               onChange={(event) =>
                                 setSubtitleStyle((currentStyle) => ({
@@ -3369,7 +3559,7 @@ export default function App() {
                               value={subtitleStyle.fontWeight}
                               min={100}
                               max={900}
-                              step={100}
+                              step={10}
                               onCommit={(nextValue) =>
                                 setSubtitleStyle((currentStyle) => ({
                                   ...currentStyle,
@@ -3644,6 +3834,7 @@ export default function App() {
                             setAdvancedControlsOpen(false);
                             void loadRemoteFontStylesheet(
                               DEFAULT_FONT_STYLESHEET_URL,
+                              { selectFirstFamily: false },
                             ).catch((error: unknown) => {
                               setNotice(
                                 error instanceof Error

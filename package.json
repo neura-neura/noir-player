@@ -1,6 +1,6 @@
 {
   "name": "noir-player",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Windows desktop video player built with Tauri, React, and FFmpeg-assisted media fallback.",
   "type": "module",
@@ -15,6 +15,7 @@
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-window-state": "^2.4.1",
     "dompurify": "3.3.3",
+    "hls.js": "^1.6.16",
     "jschardet": "3.1.4",
     "jszip": "3.10.1",
     "plyr": "3.8.4",

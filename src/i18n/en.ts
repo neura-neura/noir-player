@@ -15,6 +15,10 @@ export const en: AppMessages = {
     welcome: 'Choose a video or use Open with on any supported file.',
     videoDetected: (fileName) => `Video detected automatically: ${fileName}.`,
     videoLoaded: (fileName) => `Video loaded: ${fileName}.`,
+    videoPreparing: (fileName) => `Preparing playback for ${fileName}...`,
+    transportStreamNeedsPath: (fileName) =>
+      `${fileName} needs the desktop file picker or Open with so it can be streamed by path.`,
+    hlsPlaybackFailed: 'The TS stream could not be played.',
     diskReadFailed: (fileName) => `I could not open ${fileName} from disk.`,
     inspectorOpened: (selector) =>
       `DevTools opened. Inspect \`${selector}\` to refine the default subtitle style.`,
