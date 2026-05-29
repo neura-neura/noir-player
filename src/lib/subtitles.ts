@@ -32,7 +32,7 @@ export class SubtitleLoadError extends Error {
 }
 
 const FALLBACK_ENCODINGS = ['utf-8', 'windows-1252', 'iso-8859-1'] as const;
-const SUPPORTED_ARCHIVE_ENTRY = /\.(srt|vtt)$/i;
+const SUPPORTED_ARCHIVE_ENTRY = /\.(srt|vtt|ass|ssa)$/i;
 
 function normalizeText(rawText: string): string {
   return rawText
@@ -130,6 +130,17 @@ function sanitizeCueHtml(rawText: string): string {
   }).replace(/&gt;/g, '>');
 }
 
+function isAssSubtitleFile(fileName?: string): boolean {
+  return /\.(ass|ssa)$/i.test(fileName || '');
+}
+
+function isAssSubtitleText(rawText: string): boolean {
+  return (
+    /^\s*\[(?:Script Info|Events|V4\+? Styles)\]/im.test(rawText) &&
+    /^\s*Dialogue\s*:/im.test(rawText)
+  );
+}
+
 function parseMilliseconds(rawValue: string): number {
   const [leftPart, rawMs = '0'] = rawValue.trim().replace(',', '.').split('.');
   const segments = leftPart.split(':').map((segment) => Number(segment));
@@ -192,7 +203,127 @@ function parseCueBlock(block: string): SubtitleCue | null {
   };
 }
 
-export function parseSubtitleText(rawText: string): SubtitleCue[] {
+function splitAssFields(rawValue: string, expectedFieldCount: number): string[] {
+  if (expectedFieldCount <= 1) {
+    return [rawValue];
+  }
+
+  const fields: string[] = [];
+  let remainingValue = rawValue;
+
+  for (let index = 1; index < expectedFieldCount; index += 1) {
+    const separatorIndex = remainingValue.indexOf(',');
+    if (separatorIndex < 0) {
+      fields.push(remainingValue.trim());
+      remainingValue = '';
+      break;
+    }
+
+    fields.push(remainingValue.slice(0, separatorIndex).trim());
+    remainingValue = remainingValue.slice(separatorIndex + 1);
+  }
+
+  fields.push(remainingValue.trim());
+
+  while (fields.length < expectedFieldCount) {
+    fields.push('');
+  }
+
+  return fields;
+}
+
+function stripAssCueMarkup(rawText: string): string {
+  return rawText
+    .replace(/\\[Nn]/g, '<br />')
+    .replace(/\\h/g, ' ')
+    .replace(/\{[^}]*\}/g, '')
+    .replace(/\\([{}])/g, '$1');
+}
+
+function parseAssSubtitleText(rawText: string): SubtitleCue[] {
+  const lines = rawText
+    .replace(/^\uFEFF/, '')
+    .replace(/\r\n?/g, '\n')
+    .split('\n');
+  const cues: SubtitleCue[] = [];
+  let hasSeenSection = false;
+  let isInsideEventsSection = false;
+  let eventFormat: string[] | null = null;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith(';')) {
+      continue;
+    }
+
+    const sectionMatch = line.match(/^\[([^\]]+)]$/);
+    if (sectionMatch) {
+      hasSeenSection = true;
+      isInsideEventsSection = sectionMatch[1].trim().toLowerCase() === 'events';
+      continue;
+    }
+
+    if (!isInsideEventsSection && hasSeenSection) {
+      continue;
+    }
+
+    if (/^Format\s*:/i.test(line)) {
+      eventFormat = line
+        .replace(/^Format\s*:\s*/i, '')
+        .split(',')
+        .map((field) => field.trim().toLowerCase());
+      continue;
+    }
+
+    if (!/^Dialogue\s*:/i.test(line)) {
+      continue;
+    }
+
+    const dialogueText = line.replace(/^Dialogue\s*:\s*/i, '');
+    const fields = splitAssFields(dialogueText, eventFormat?.length || 10);
+    const startIndex = eventFormat?.indexOf('start') ?? 1;
+    const endIndex = eventFormat?.indexOf('end') ?? 2;
+    const textIndex = eventFormat?.indexOf('text') ?? 9;
+
+    if (
+      startIndex < 0 ||
+      endIndex < 0 ||
+      textIndex < 0 ||
+      !fields[startIndex] ||
+      !fields[endIndex]
+    ) {
+      continue;
+    }
+
+    const startMs = parseMilliseconds(fields[startIndex]);
+    const endMs = parseMilliseconds(fields[endIndex]);
+    const html = sanitizeCueHtml(stripAssCueMarkup(fields[textIndex] || ''));
+
+    if (!html || endMs <= startMs) {
+      continue;
+    }
+
+    cues.push({
+      startMs,
+      endMs,
+      html,
+    });
+  }
+
+  return cues.sort(
+    (leftCue, rightCue) =>
+      leftCue.startMs - rightCue.startMs || leftCue.endMs - rightCue.endMs,
+  );
+}
+
+export function parseSubtitleText(
+  rawText: string,
+  fileName?: string,
+): SubtitleCue[] {
+  if (isAssSubtitleFile(fileName) || isAssSubtitleText(rawText)) {
+    return parseAssSubtitleText(rawText);
+  }
+
   const normalized = normalizeText(rawText);
   if (!normalized) {
     return [];
@@ -235,7 +366,7 @@ export async function loadSubtitleTrack(file: File): Promise<SubtitleTrack> {
     : { fileName: file.name, buffer: await readFileBuffer(file) };
 
   const rawText = decodeSubtitleBuffer(source.buffer);
-  const cues = parseSubtitleText(rawText);
+  const cues = parseSubtitleText(rawText, source.fileName);
 
   if (!cues.length) {
     throw new SubtitleLoadError('no_valid_cues');

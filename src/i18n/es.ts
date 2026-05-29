@@ -104,7 +104,7 @@ export const es: AppMessages = {
     autoEyebrow: 'Listo para subtitulos',
     loadTitle: 'El video ya esta listo. Ahora carga el subtitulo.',
     loadedFile: (fileName) => `Cargado: ${fileName}`,
-    emptyDrop: 'Arrastra aqui un .srt, .vtt o .zip',
+    emptyDrop: 'Arrastra aqui un .srt, .vtt, .ass, .ssa o .zip',
     cuesReady: (cueCount) => `${cueCount} cues listos para sincronizar.`,
     dropHint: 'Tambien puedes hacer clic aqui o usar el boton de abajo.',
     selectSubtitle: 'Seleccionar subtitulo',
@@ -226,7 +226,7 @@ export const es: AppMessages = {
   },
   errors: {
     invalidTimestamp: (rawValue) => `Tiempo de subtitulo invalido: ${rawValue}`,
-    zipMissing: 'El ZIP no contiene ningun archivo .srt o .vtt.',
+    zipMissing: 'El ZIP no contiene ningun archivo .srt, .vtt, .ass o .ssa.',
     noValidCues: 'No encontre cues validos dentro del subtitulo.',
   },
 };

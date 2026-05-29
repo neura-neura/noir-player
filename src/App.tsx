@@ -124,7 +124,7 @@ type WebAudioRefs = {
 
 const VIDEO_ACCEPT =
   'video/*,.mkv,.avi,.mov,.m4v,.webm,.ts,.m2ts,.wmv,.flv,.mp4';
-const SUBTITLE_ACCEPT = '.srt,.vtt,.zip';
+const SUBTITLE_ACCEPT = '.srt,.vtt,.ass,.ssa,.zip';
 const VIDEO_EXTENSIONS = [
   'mp4',
   'mkv',
@@ -137,7 +137,7 @@ const VIDEO_EXTENSIONS = [
   'wmv',
   'flv',
 ];
-const SUBTITLE_EXTENSIONS = ['srt', 'vtt', 'zip'];
+const SUBTITLE_EXTENSIONS = ['srt', 'vtt', 'ass', 'ssa', 'zip'];
 const APP_NAME = 'Noir Player';
 const STYLE_STORAGE_KEY = 'noir-web-player:subtitle-style';
 const STYLE_PRESET_VERSION_STORAGE_KEY =
@@ -421,7 +421,7 @@ function isVideoFileName(fileName: string): boolean {
 }
 
 function isSubtitleFileName(fileName: string): boolean {
-  return /\.(srt|vtt|zip)$/i.test(fileName);
+  return /\.(srt|vtt|ass|ssa|zip)$/i.test(fileName);
 }
 
 function isDesktopApp(): boolean {
@@ -583,7 +583,7 @@ function buildShiftedSubtitleText(track: SubtitleTrack, shiftMs: number): {
 } {
   const extension = track.fileName.split('.').pop()?.toLowerCase() || 'srt';
   const isVtt = extension === 'vtt';
-  const nextFileName = track.fileName.replace(/\.(srt|vtt)$/i, isVtt ? '.vtt' : '.srt');
+  const nextFileName = track.fileName.replace(/\.(srt|vtt|ass|ssa)$/i, isVtt ? '.vtt' : '.srt');
 
   const blocks = track.cues.map((cue, index) => {
     const startMs = Math.max(0, cue.startMs + shiftMs);

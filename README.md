@@ -19,7 +19,7 @@ It focuses on local playback with a workflow that is especially useful when you 
 
 - Open local videos from the app or from Windows file association.
 - Drag and drop videos and subtitle files into the app.
-- Load external subtitles from `.srt`, `.vtt`, and `.zip`.
+- Load external subtitles from `.srt`, `.vtt`, `.ass`, `.ssa`, and `.zip`.
 - Select embedded subtitle tracks detected from the video container.
 - Select embedded audio tracks and use automatic fallback for codecs the WebView may not play natively.
 - Adjust subtitle offset, font, size, weight, colors, opacity, position, width, padding, radius, line height, and letter spacing.
@@ -33,16 +33,18 @@ It focuses on local playback with a workflow that is especially useful when you 
 
 - `.srt`
 - `.vtt`
-- `.zip` containing `.srt` or `.vtt`
+- `.ass`
+- `.ssa`
+- `.zip` containing `.srt`, `.vtt`, `.ass`, or `.ssa`
 
 ### Embedded subtitles
 
 - Text subtitle tracks that `ffmpeg` can extract and convert to WebVTT
-- Basic support for embedded `ASS/SSA`
+- Basic support for `ASS/SSA`
 
 ### Important limitation for `ASS/SSA`
 
-Embedded `ASS/SSA` subtitles are currently converted to a basic text overlay.
+`ASS/SSA` subtitles are currently converted to a basic text overlay.
 
 That means:
 

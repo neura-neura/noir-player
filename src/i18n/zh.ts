@@ -101,7 +101,7 @@ export const zh: AppMessages = {
     autoEyebrow: 'ç­‰å¾…å­—å¹•',
     loadTitle: 'è§†é¢‘å·²ç»å‡†å¤‡å¥½ï¼ŒçŽ°åœ¨åŠ è½½å­—å¹•æ–‡ä»¶ã€‚',
     loadedFile: (fileName) => `å·²åŠ è½½ï¼š${fileName}`,
-    emptyDrop: 'å°† .srtã€.vtt æˆ– .zip æ‹–åˆ°è¿™é‡Œ',
+    emptyDrop: 'å°† .srtã€.vttã€.assã€.ssa æˆ– .zip æ‹–åˆ°è¿™é‡Œ',
     cuesReady: (cueCount) => `${cueCount} æ¡å­—å¹•å·²å¯åŒæ­¥ã€‚`,
     dropHint: 'ä½ ä¹Ÿå¯ä»¥ç‚¹å‡»è¿™é‡Œæˆ–ä½¿ç”¨ä¸‹é¢çš„æŒ‰é’®ã€‚',
     selectSubtitle: 'é€‰æ‹©å­—å¹•',
@@ -220,7 +220,7 @@ export const zh: AppMessages = {
   },
   errors: {
     invalidTimestamp: (rawValue) => `å­—å¹•æ—¶é—´æ— æ•ˆï¼š${rawValue}`,
-    zipMissing: 'ZIP æ–‡ä»¶ä¸­æ²¡æœ‰æ‰¾åˆ° .srt æˆ– .vtt å­—å¹•æ–‡ä»¶ã€‚',
+    zipMissing: 'ZIP æ–‡ä»¶ä¸­æ²¡æœ‰æ‰¾åˆ° .srtã€.vttã€.ass æˆ– .ssa å­—å¹•æ–‡ä»¶ã€‚',
     noValidCues: 'æ²¡æœ‰åœ¨è¯¥å­—å¹•æ–‡ä»¶ä¸­æ‰¾åˆ°æœ‰æ•ˆçš„æ—¶é—´è½´ã€‚',
   },
 };

@@ -102,7 +102,7 @@ export const en: AppMessages = {
     autoEyebrow: 'Ready for subtitles',
     loadTitle: 'The video is ready. Now load the subtitle file.',
     loadedFile: (fileName) => `Loaded: ${fileName}`,
-    emptyDrop: 'Drop a .srt, .vtt, or .zip here',
+    emptyDrop: 'Drop a .srt, .vtt, .ass, .ssa, or .zip here',
     cuesReady: (cueCount) => `${cueCount} cues ready to sync.`,
     dropHint: 'You can also click here or use the button below.',
     selectSubtitle: 'Choose subtitle',
@@ -220,7 +220,7 @@ export const en: AppMessages = {
   },
   errors: {
     invalidTimestamp: (rawValue) => `Invalid subtitle timestamp: ${rawValue}`,
-    zipMissing: 'The ZIP file does not contain any .srt or .vtt subtitle file.',
+    zipMissing: 'The ZIP file does not contain any .srt, .vtt, .ass, or .ssa subtitle file.',
     noValidCues: 'I could not find valid subtitle cues in that file.',
   },
 };
