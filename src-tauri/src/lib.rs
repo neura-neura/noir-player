@@ -25,6 +25,7 @@ const SUPPORTED_VIDEO_EXTENSIONS: &[&str] = &[
 const PLAYBACK_CACHE_VERSION: &str = "ts-h264-aac-v2";
 const HLS_CACHE_VERSION: &str = "ts-hls-segments-v1";
 const HLS_SEGMENT_SECONDS: f64 = 2.0;
+const SYNCPLAY_CONTROL_ADDR: &str = "127.0.0.1:32123";
 
 #[derive(Default)]
 struct LaunchVideoState {
@@ -34,6 +35,33 @@ struct LaunchVideoState {
 #[derive(Default)]
 struct TsStreamServerState {
     server: Mutex<Option<TsStreamServerHandle>>,
+}
+
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncplayStatus {
+    loaded: bool,
+    paused: bool,
+    position: f64,
+    duration: f64,
+    rate: f64,
+    path: Option<String>,
+    file_name: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct SyncplayControlState {
+    status: Arc<Mutex<SyncplayStatus>>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncplayCommand {
+    command: String,
+    position: Option<f64>,
+    rate: Option<f64>,
+    path: Option<String>,
+    message: Option<String>,
 }
 
 #[derive(Clone)]
@@ -254,7 +282,7 @@ where
     let mut response = response;
     for (name, value) in [
         ("Access-Control-Allow-Origin", "*"),
-        ("Access-Control-Allow-Methods", "GET, OPTIONS"),
+        ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
         ("Access-Control-Allow-Headers", "Range, Content-Type"),
     ] {
         if let Some(header) = make_header(name, value) {
@@ -274,6 +302,18 @@ fn respond_text(request: tiny_http::Request, status: u16, body: String, content_
     let _ = request.respond(response);
 }
 
+fn respond_json<T: serde::Serialize>(request: tiny_http::Request, status: u16, body: &T) {
+    match serde_json::to_string(body) {
+        Ok(body) => respond_text(request, status, body, "application/json; charset=utf-8"),
+        Err(error) => respond_text(
+            request,
+            500,
+            format!("Could not encode response: {error}"),
+            "text/plain; charset=utf-8",
+        ),
+    }
+}
+
 fn respond_bytes(request: tiny_http::Request, status: u16, body: Vec<u8>, content_type: &str) {
     let mut response = add_common_headers(
         tiny_http::Response::from_data(body).with_status_code(tiny_http::StatusCode(status)),
@@ -285,6 +325,86 @@ fn respond_bytes(request: tiny_http::Request, status: u16, body: Vec<u8>, conten
         response.add_header(header);
     }
     let _ = request.respond(response);
+}
+
+fn handle_syncplay_request(
+    mut request: tiny_http::Request,
+    app: &AppHandle,
+    status: &Arc<Mutex<SyncplayStatus>>,
+) {
+    if request.method() == &tiny_http::Method::Options {
+        let response = add_common_headers(
+            tiny_http::Response::empty(tiny_http::StatusCode(204))
+                .with_status_code(tiny_http::StatusCode(204)),
+        );
+        let _ = request.respond(response);
+        return;
+    }
+
+    let url = request.url().split('?').next().unwrap_or(request.url());
+    match (request.method(), url) {
+        (&tiny_http::Method::Get, "/syncplay/health") => {
+            respond_json(
+                request,
+                200,
+                &serde_json::json!({"ok": true, "protocol": 1}),
+            );
+        }
+        (&tiny_http::Method::Get, "/syncplay/status") => {
+            let snapshot = status
+                .lock()
+                .map(|current| current.clone())
+                .unwrap_or_default();
+            respond_json(request, 200, &snapshot);
+        }
+        (&tiny_http::Method::Post, "/syncplay/command") => {
+            let mut body = String::new();
+            if let Err(error) = request.as_reader().read_to_string(&mut body) {
+                respond_text(
+                    request,
+                    400,
+                    format!("Could not read command: {error}"),
+                    "text/plain; charset=utf-8",
+                );
+                return;
+            }
+
+            match serde_json::from_str::<SyncplayCommand>(&body) {
+                Ok(command) => {
+                    let _ = app.emit("syncplay-command", command);
+                    respond_json(request, 200, &serde_json::json!({"ok": true}));
+                }
+                Err(error) => respond_text(
+                    request,
+                    400,
+                    format!("Invalid command: {error}"),
+                    "text/plain; charset=utf-8",
+                ),
+            }
+        }
+        _ => respond_text(
+            request,
+            404,
+            "Not found".into(),
+            "text/plain; charset=utf-8",
+        ),
+    }
+}
+
+fn start_syncplay_control_server(
+    app: AppHandle,
+    status: Arc<Mutex<SyncplayStatus>>,
+) -> Result<(), String> {
+    let server =
+        tiny_http::Server::http(SYNCPLAY_CONTROL_ADDR).map_err(|error| error.to_string())?;
+
+    thread::spawn(move || {
+        for request in server.incoming_requests() {
+            handle_syncplay_request(request, &app, &status);
+        }
+    });
+
+    Ok(())
 }
 
 fn build_hls_playlist(session: &TsStreamSession) -> String {
@@ -1324,6 +1444,16 @@ fn save_subtitle_to_downloads(
     Ok(target_path.to_string_lossy().to_string())
 }
 
+#[tauri::command]
+fn syncplay_update_status(
+    state: State<'_, SyncplayControlState>,
+    status: SyncplayStatus,
+) -> Result<(), String> {
+    let mut current_status = state.status.lock().map_err(|error| error.to_string())?;
+    *current_status = status;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let initial_video = find_first_video_arg(std::env::args().skip(1));
@@ -1346,6 +1476,7 @@ pub fn run() {
             pending_video: Mutex::new(initial_video),
         })
         .manage(TsStreamServerState::default())
+        .manage(SyncplayControlState::default())
         .invoke_handler(tauri::generate_handler![
             get_launch_video,
             open_devtools,
@@ -1357,7 +1488,8 @@ pub fn run() {
             list_embedded_audio_streams,
             extract_embedded_subtitle_stream,
             extract_embedded_audio_stream,
-            save_subtitle_to_downloads
+            save_subtitle_to_downloads,
+            syncplay_update_status
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -1367,6 +1499,9 @@ pub fn run() {
                         .build(),
                 )?;
             }
+
+            let status = app.state::<SyncplayControlState>().status.clone();
+            start_syncplay_control_server(app.handle().clone(), status)?;
 
             Ok(())
         })

@@ -71,6 +71,17 @@ That means:
 - FFmpeg / FFprobe bundled with the desktop build
   - not committed to GitHub because the Windows binaries exceed GitHub's regular file size limit
 
+## Syncplay integration
+
+This build exposes a loopback-only control API for the Noir Player adapter in the
+[Syncplay-Noir fork](https://github.com/neura-neura/syncplay-noir). It listens on
+`127.0.0.1:32123`, so video data never passes through the Syncplay server.
+
+The API supports health/status queries and the playback commands needed by
+Syncplay: open a local file, play, pause, seek, and change playback rate. Each
+participant keeps a local copy of the video and only the small control events
+cross the network through Syncplay.
+
 ## Requirements
 
 ### For running the packaged app

@@ -82,6 +82,14 @@ type OpenFilePayload = {
   path: string;
 };
 
+type SyncplayCommand = {
+  command: 'open' | 'play' | 'pause' | 'seek' | 'rate' | 'message';
+  path?: string;
+  position?: number;
+  rate?: number;
+  message?: string;
+};
+
 type TsStreamSource = {
   playlistUrl: string;
   durationSeconds: number;
@@ -827,6 +835,17 @@ export default function App() {
   const playerRef = useRef<Plyr | null>(null);
   const hlsRef = useRef<Hls | null>(null);
   const webAudioRef = useRef<WebAudioRefs | null>(null);
+  const syncplayPendingStateRef = useRef<{
+    openPath: string | null;
+    position: number | null;
+    rate: number | null;
+    paused: boolean | null;
+  }>({
+    openPath: null,
+    position: null,
+    rate: null,
+    paused: null,
+  });
   const playOnReadyRef = useRef(false);
   const applyOpenPreferencesRef = useRef(true);
   const preservedPlaybackStateRef = useRef<PlaybackStateSnapshot | null>(null);
@@ -969,6 +988,59 @@ export default function App() {
           : messages.notices.diskReadFailed(fileName),
       );
     }
+  }
+
+  function applyPendingSyncplayState(
+    videoElement: HTMLVideoElement,
+    sourcePath?: string,
+  ): boolean {
+    const pending = syncplayPendingStateRef.current;
+    if (pending.openPath && !areFilePathsEqual(pending.openPath, sourcePath)) {
+      return false;
+    }
+
+    let appliedPlaybackState = false;
+    if (pending.rate !== null && Number.isFinite(pending.rate)) {
+      videoElement.playbackRate = clamp(pending.rate, 0.25, 4);
+      pending.rate = null;
+      appliedPlaybackState = true;
+    }
+
+    if (
+      pending.position !== null &&
+      videoElement.readyState >= HTMLMediaElement.HAVE_METADATA &&
+      Number.isFinite(pending.position)
+    ) {
+      const position = Math.max(0, pending.position);
+      const duration = Number.isFinite(videoElement.duration)
+        ? Math.max(0, videoElement.duration)
+        : null;
+      videoElement.currentTime =
+        duration === null ? position : clamp(position, 0, duration);
+      pending.position = null;
+      appliedPlaybackState = true;
+    }
+
+    if (
+      pending.paused !== null &&
+      videoElement.readyState >= HTMLMediaElement.HAVE_METADATA
+    ) {
+      if (pending.paused) {
+        videoElement.pause();
+      } else {
+        void videoElement.play().catch(() => {
+          // Ignore autoplay restrictions; a later Syncplay update can retry.
+        });
+      }
+      pending.paused = null;
+      appliedPlaybackState = true;
+    }
+
+    if (pending.openPath && areFilePathsEqual(pending.openPath, sourcePath)) {
+      pending.openPath = null;
+    }
+
+    return appliedPlaybackState;
   }
 
   function openVideoFromFile(file: File) {
@@ -2425,6 +2497,120 @@ export default function App() {
   }, [messages, rememberSyncOffset, shouldOpenPanelOnVideoReady]);
 
   useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    let active = true;
+
+    async function wireSyncplayCommands() {
+      try {
+        unlisten = await listen<SyncplayCommand>('syncplay-command', (event) => {
+          if (!active) {
+            return;
+          }
+
+          const command = event.payload;
+          const pending = syncplayPendingStateRef.current;
+
+          if (command.command === 'open') {
+            if (!command.path) {
+              return;
+            }
+
+            pending.openPath = command.path;
+            pending.position = null;
+            pending.rate = null;
+            pending.paused = null;
+            void openVideoFromPath(command.path, {
+              playOnReady: false,
+              applyOpenPreferences: false,
+            });
+            return;
+          }
+
+          if (command.command === 'seek') {
+            if (
+              typeof command.position === 'number' &&
+              Number.isFinite(command.position)
+            ) {
+              pending.position = Math.max(0, command.position);
+              if (videoElementRef.current) {
+                applyPendingSyncplayState(videoElementRef.current, videoSource?.path);
+              }
+            }
+            return;
+          }
+
+          if (command.command === 'rate') {
+            if (typeof command.rate === 'number' && Number.isFinite(command.rate)) {
+              pending.rate = command.rate;
+              if (videoElementRef.current) {
+                applyPendingSyncplayState(videoElementRef.current, videoSource?.path);
+              }
+            }
+            return;
+          }
+
+          if (command.command === 'play' || command.command === 'pause') {
+            pending.paused = command.command === 'pause';
+            if (videoElementRef.current) {
+              applyPendingSyncplayState(videoElementRef.current, videoSource?.path);
+            }
+          }
+        });
+      } catch {
+        // Browser preview is fine without the desktop bridge.
+      }
+    }
+
+    void wireSyncplayCommands();
+
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [messages, rememberSyncOffset, shouldOpenPanelOnVideoReady, videoSource?.path]);
+
+  useEffect(() => {
+    const reportStatus = () => {
+      const videoElement = videoElementRef.current;
+      const hasMetadata = Boolean(
+        videoSource &&
+          videoElement &&
+          videoElement.readyState >= HTMLMediaElement.HAVE_METADATA,
+      );
+      const position =
+        videoElement && Number.isFinite(videoElement.currentTime)
+          ? Math.max(0, videoElement.currentTime)
+          : 0;
+      const duration =
+        videoElement && Number.isFinite(videoElement.duration)
+          ? Math.max(0, videoElement.duration)
+          : 0;
+      const rate =
+        videoElement && Number.isFinite(videoElement.playbackRate)
+          ? videoElement.playbackRate
+          : 1;
+
+      void invoke('syncplay_update_status', {
+        status: {
+          loaded: hasMetadata,
+          paused: videoElement?.paused ?? true,
+          position,
+          duration,
+          rate,
+          path: videoSource?.path ?? null,
+          fileName: videoSource?.fileName ?? null,
+        },
+      }).catch(() => {
+        // Browser preview is fine without the desktop bridge.
+      });
+    };
+
+    reportStatus();
+    const timerId = window.setInterval(reportStatus, 250);
+    return () => window.clearInterval(timerId);
+  }, [videoSource?.fileName, videoSource?.path, videoSource?.src]);
+
+  useEffect(() => {
     let unlistenNativeDrop: UnlistenFn | undefined;
 
     async function wireNativeDrop() {
@@ -2745,9 +2931,15 @@ export default function App() {
         setPanelTab('load');
       }
 
+      const syncplayPlaybackApplied = applyPendingSyncplayState(
+        videoElement,
+        videoSource?.path,
+      );
       const shouldForcePlayOnReady = playOnReadyRef.current;
       const shouldPlayOnReady =
-        shouldForcePlayOnReady || (shouldApplyOpenPreferences && autoplayOnOpen);
+        syncplayPlaybackApplied
+          ? !videoElement.paused
+          : shouldForcePlayOnReady || (shouldApplyOpenPreferences && autoplayOnOpen);
       playOnReadyRef.current = false;
 
       refreshEmbeddedSubtitleTracks();
