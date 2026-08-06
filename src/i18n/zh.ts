@@ -19,6 +19,8 @@ export const zh: AppMessages = {
     transportStreamNeedsPath: (fileName) =>
       `${fileName} needs the desktop picker or Open with for TS streaming.`,
     hlsPlaybackFailed: 'Could not play the TS stream.',
+    nativeMpvUnavailable: 'Native mpv playback is unavailable. Preparing a fallback.',
+    audioTrackUnavailable: 'Could not select that audio track.',
     diskReadFailed: (fileName) => `æ— æ³•ä»Žç£ç›˜æ‰“å¼€ ${fileName}ã€‚`,
     inspectorOpened: (selector) =>
       `DevTools å·²æ‰“å¼€ã€‚æ£€æŸ¥ \`${selector}\` ä»¥å¾®è°ƒé»˜è®¤å­—å¹•æ ·å¼ã€‚`,

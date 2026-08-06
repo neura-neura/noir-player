@@ -19,6 +19,9 @@ export const es: AppMessages = {
     transportStreamNeedsPath: (fileName) =>
       `${fileName} necesita el selector de escritorio o Abrir con para poder reproducirse por streaming.`,
     hlsPlaybackFailed: 'No pude reproducir el stream TS.',
+    nativeMpvUnavailable:
+      'La reproduccion nativa de mpv no esta disponible. Preparare una copia compatible.',
+    audioTrackUnavailable: 'No pude seleccionar esa pista de audio.',
     diskReadFailed: (fileName) => `No pude abrir ${fileName} desde el disco.`,
     inspectorOpened: (selector) =>
       `DevTools abierto. Inspecciona \`${selector}\` para afinar el estilo de subtitulos por defecto.`,

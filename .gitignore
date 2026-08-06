@@ -39,3 +39,5 @@ next-env.d.ts
 # tauri
 /src-tauri/target
 /src-tauri/resources/bin/*.exe
+/src-tauri/lib/*.dll
+/src-tauri/lib/temp

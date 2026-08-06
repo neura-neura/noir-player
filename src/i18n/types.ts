@@ -14,6 +14,8 @@ export type AppMessages = {
     videoPreparing: (fileName: string) => string;
     transportStreamNeedsPath: (fileName: string) => string;
     hlsPlaybackFailed: string;
+    nativeMpvUnavailable: string;
+    audioTrackUnavailable: string;
     diskReadFailed: (fileName: string) => string;
     inspectorOpened: (selector: string) => string;
     inspectorUnavailable: string;

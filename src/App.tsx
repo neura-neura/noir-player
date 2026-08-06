@@ -1,13 +1,33 @@
 ﻿import { useEffect, useRef, useState } from 'react';
-import type { CSSProperties, DragEvent } from 'react';
+import type { CSSProperties, DragEvent, MouseEvent } from 'react';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import DOMPurify from 'dompurify';
 import Hls from 'hls.js';
+import {
+  Maximize2,
+  Minimize2,
+  Pause,
+  Play,
+  Volume2,
+  VolumeX,
+} from 'lucide-react';
 import Plyr from 'plyr';
 import 'plyr/dist/plyr.css';
+import {
+  command as mpvCommand,
+  destroy as destroyMpv,
+  getProperty as getMpvProperty,
+  init as initMpv,
+  observeProperties as observeMpvProperties,
+  listenEvents as listenMpvEvents,
+  setProperty as setMpvProperty,
+  setVideoMarginRatio,
+  type MpvObservableProperty,
+} from 'tauri-plugin-libmpv-api';
 import {
   findActiveCueIndex,
   formatMillisecondsAsSeconds,
@@ -28,7 +48,7 @@ import {
 type VideoSource = {
   src: string;
   fileName: string;
-  kind: 'object' | 'path' | 'hls';
+  kind: 'object' | 'path' | 'hls' | 'mpv';
   path?: string;
 };
 
@@ -129,6 +149,19 @@ type WebAudioRefs = {
   source: MediaElementAudioSourceNode;
   gain: GainNode;
 };
+
+const MPV_OBSERVED_PROPERTIES = [
+  ['pause', 'flag'],
+  ['time-pos', 'double', 'none'],
+  ['duration', 'double', 'none'],
+  ['volume', 'double'],
+  ['mute', 'flag'],
+  ['speed', 'double'],
+  ['filename', 'string', 'none'],
+  ['eof-reached', 'flag', 'none'],
+  ['video-params/w', 'int64', 'none'],
+  ['video-params/h', 'int64', 'none'],
+] as const satisfies readonly MpvObservableProperty[];
 
 const VIDEO_ACCEPT =
   'video/*,.mkv,.avi,.mov,.m4v,.webm,.ts,.m2ts,.wmv,.flv,.mp4';
@@ -457,6 +490,49 @@ function areFilePathsEqual(firstPath?: string, secondPath?: string): boolean {
   return isLikelyWindowsPath && first.toLowerCase() === second.toLowerCase();
 }
 
+function toMpvFileUrl(filePath: string): string {
+  if (/^file:\/\//i.test(filePath)) {
+    return filePath;
+  }
+
+  const normalizedPath = filePath.replace(/\\/g, '/');
+  const segments = normalizedPath.split('/').map((segment, index) =>
+    index === 0 && /^[A-Za-z]:$/.test(segment)
+      ? segment
+      : encodeURIComponent(segment),
+  );
+
+  if (normalizedPath.startsWith('//')) {
+    const uncSegments = normalizedPath.replace(/^\/+/, '').split('/');
+    const host = uncSegments.shift() || '';
+    return `file://${host}/${uncSegments.map((segment) => encodeURIComponent(segment)).join('/')}`;
+  }
+
+  return /^[A-Za-z]:\//.test(normalizedPath)
+    ? `file:///${segments.join('/')}`
+    : `file://${segments.join('/')}`;
+}
+
+function decodeMpvFilePath(filePath: string): string {
+  if (!/^file:\/\//i.test(filePath)) {
+    return filePath;
+  }
+
+  try {
+    const fileUrl = new URL(filePath);
+    const decodedPath = decodeURIComponent(fileUrl.pathname);
+    if (fileUrl.hostname && fileUrl.hostname !== 'localhost') {
+      return `\\\\${fileUrl.hostname}${decodedPath.replace(/\//g, '\\')}`;
+    }
+
+    return /^\/[A-Za-z]:/.test(decodedPath)
+      ? decodedPath.slice(1).replace(/\//g, '\\')
+      : decodedPath;
+  } catch {
+    return filePath;
+  }
+}
+
 function formatFontStack(rawValue: string): string {
   const trimmed = rawValue.trim();
   if (!trimmed) {
@@ -567,6 +643,16 @@ function formatSrtTimestamp(milliseconds: number): string {
 
 function formatVttTimestamp(milliseconds: number): string {
   return formatSrtTimestamp(milliseconds).replace(',', '.');
+}
+
+function formatPlaybackTime(seconds: number): string {
+  const safeSeconds = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
+  const hours = Math.floor(safeSeconds / 3_600);
+  const minutes = Math.floor((safeSeconds % 3_600) / 60);
+  const remainingSeconds = safeSeconds % 60;
+  const time = `${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
+
+  return hours > 0 ? `${String(hours).padStart(2, '0')}:${time}` : time;
 }
 
 function decodeHtmlEntities(rawValue: string): string {
@@ -784,7 +870,11 @@ export default function App() {
   const [endPlaybackAction, setEndPlaybackAction] = useState<EndPlaybackAction>(
     readStoredEndPlaybackAction,
   );
-  const [dockHovering, setDockHovering] = useState(false);
+  const [desktopWindowReady, setDesktopWindowReady] = useState(() => !isDesktopApp());
+  const [playbackControlsVisible, setPlaybackControlsVisible] = useState(true);
+  const [playbackFeedback, setPlaybackFeedback] = useState<
+    'play' | 'pause' | null
+  >(null);
   const [systemFontsLoading, setSystemFontsLoading] = useState(false);
   const [systemFonts, setSystemFonts] = useState<string[]>([]);
   const [fontSearchQuery, setFontSearchQuery] = useState('');
@@ -818,10 +908,26 @@ export default function App() {
   const [subtitleStyle, setSubtitleStyle] =
     useState<SubtitleStyle>(readStoredStyle);
   const [syncOffsetMs, setSyncOffsetMs] = useState(readStoredSyncOffset);
+  const [mpvStatus, setMpvStatus] = useState<
+    'disabled' | 'loading' | 'ready' | 'failed'
+  >(() => (isDesktopApp() ? 'loading' : 'disabled'));
+  const [mpvPaused, setMpvPaused] = useState(true);
+  const [mpvTimePos, setMpvTimePos] = useState(0);
+  const [mpvDuration, setMpvDuration] = useState(0);
+  const [mpvVolume, setMpvVolume] = useState(1);
+  const [mpvMuted, setMpvMuted] = useState(false);
+  const [mpvPlaybackRate, setMpvPlaybackRate] = useState(1);
+  const [mpvFilename, setMpvFilename] = useState<string | null>(null);
+  const [mpvVideoWidth, setMpvVideoWidth] = useState(0);
+  const [mpvVideoHeight, setMpvVideoHeight] = useState(0);
+  const [mpvFileLoadedTick, setMpvFileLoadedTick] = useState(0);
+  const [mpvEndFileTick, setMpvEndFileTick] = useState(0);
+  const [nativeFullscreen, setNativeFullscreen] = useState(false);
 
   const videoInputRef = useRef<HTMLInputElement>(null);
   const subtitleInputRef = useRef<HTMLInputElement>(null);
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
+  const playerFrameRef = useRef<HTMLDivElement | null>(null);
   const externalAudioRef = useRef<HTMLAudioElement | null>(null);
   const injectedSubtitleTrackRef = useRef<HTMLTrackElement | null>(null);
   const injectedSubtitleObjectUrlRef = useRef<string | null>(null);
@@ -835,6 +941,14 @@ export default function App() {
   const playerRef = useRef<Plyr | null>(null);
   const hlsRef = useRef<Hls | null>(null);
   const webAudioRef = useRef<WebAudioRefs | null>(null);
+  const mpvPlaybackStateRef = useRef({
+    paused: true,
+    timePos: 0,
+    duration: 0,
+    playbackRate: 1,
+  });
+  const handledMpvFileLoadedTickRef = useRef(0);
+  const mpvFallbackPathRef = useRef<string | null>(null);
   const syncplayPendingStateRef = useRef<{
     openPath: string | null;
     position: number | null;
@@ -854,14 +968,35 @@ export default function App() {
   const pageDragDepthRef = useRef(0);
   const heroDropDepthRef = useRef(0);
   const subtitleDropDepthRef = useRef(0);
+  const playbackControlsHideTimerRef = useRef<number | null>(null);
+  const playbackFeedbackHideTimerRef = useRef<number | null>(null);
+  const nativeVideoRefreshTimersRef = useRef<number[]>([]);
+  const nativeVideoMarginUpdateRef = useRef<(() => void) | null>(null);
   const messages = MESSAGES[language];
-  const dockVisible = dockHovering || panelVisible;
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const dockVisible = playbackControlsVisible || panelVisible;
   const shouldOpenPanelOnVideoReady = openPanelOnOpen || promptForSubtitles;
 
   const activeCue =
     subtitleTrack && activeCueIndex >= 0
       ? subtitleTrack.cues[activeCueIndex]
       : null;
+  const isNativeMpvSource = videoSource?.kind === 'mpv';
+  const currentPlaybackTime = isNativeMpvSource
+    ? mpvTimePos
+    : videoElementRef.current?.currentTime || 0;
+  const currentPlaybackDuration = isNativeMpvSource
+    ? mpvDuration
+    : videoElementRef.current && Number.isFinite(videoElementRef.current.duration)
+      ? Math.max(0, videoElementRef.current.duration)
+      : 0;
+  const currentPlaybackPaused = isNativeMpvSource
+    ? mpvPaused
+    : videoElementRef.current?.paused ?? true;
+  const currentPlaybackRate = isNativeMpvSource
+    ? mpvPlaybackRate
+    : videoElementRef.current?.playbackRate || 1;
 
   const remoteFontOptions = remoteFontFamilies.map((fontName) => ({
     label: `${fontName} (CSS)`,
@@ -909,12 +1044,166 @@ export default function App() {
     ? ({ '--player-aspect-ratio': String(videoAspectRatio) } as CSSProperties)
     : undefined;
 
+  useEffect(() => {
+    mpvPlaybackStateRef.current = {
+      paused: mpvPaused,
+      timePos: mpvTimePos,
+      duration: mpvDuration,
+      playbackRate: mpvPlaybackRate,
+    };
+  }, [mpvDuration, mpvPaused, mpvPlaybackRate, mpvTimePos]);
+
+  useEffect(() => {
+    if (!isDesktopApp()) {
+      return;
+    }
+
+    let active = true;
+    const currentWindow = getCurrentWindow();
+    const nextPaint = () =>
+      new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => resolve());
+      });
+
+    const revealWindow = async () => {
+      try {
+        await document.fonts.ready;
+      } catch {
+        // The app can still be shown if the system font promise is unavailable.
+      }
+
+      await nextPaint();
+      if (!active) {
+        return;
+      }
+
+      setDesktopWindowReady(true);
+      await nextPaint();
+      if (active) {
+        await currentWindow.show().catch((error) => {
+          console.error('[Noir window] unable to reveal the main window', error);
+        });
+      }
+    };
+
+    void revealWindow();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isDesktopApp()) {
+      return;
+    }
+
+    let active = true;
+    const syncFullscreenState = () => {
+      void getCurrentWindow()
+        .isFullscreen()
+        .then((isFullscreen) => {
+          if (active) {
+            setNativeFullscreen(isFullscreen);
+            requestNativeVideoRedraw();
+          }
+        })
+        .catch(() => {
+          // Keep the last known state when the window is temporarily unavailable.
+        });
+    };
+
+    syncFullscreenState();
+    window.addEventListener('resize', syncFullscreenState);
+
+    return () => {
+      active = false;
+      window.removeEventListener('resize', syncFullscreenState);
+    };
+  }, [isNativeMpvSource]);
+
+  function clearPlaybackControlsHideTimer() {
+    if (playbackControlsHideTimerRef.current !== null) {
+      window.clearTimeout(playbackControlsHideTimerRef.current);
+      playbackControlsHideTimerRef.current = null;
+    }
+  }
+
+  function schedulePlaybackControlsHide(delay = 2200) {
+    clearPlaybackControlsHideTimer();
+    playbackControlsHideTimerRef.current = window.setTimeout(() => {
+      setPlaybackControlsVisible(false);
+      playbackControlsHideTimerRef.current = null;
+    }, delay);
+  }
+
+  function revealPlaybackControls() {
+    setPlaybackControlsVisible(true);
+    schedulePlaybackControlsHide();
+  }
+
+  function clearPlaybackFeedbackHideTimer() {
+    if (playbackFeedbackHideTimerRef.current !== null) {
+      window.clearTimeout(playbackFeedbackHideTimerRef.current);
+      playbackFeedbackHideTimerRef.current = null;
+    }
+  }
+
+  function showPlaybackFeedback(nextFeedback: 'play' | 'pause') {
+    clearPlaybackFeedbackHideTimer();
+    setPlaybackFeedback(nextFeedback);
+    playbackFeedbackHideTimerRef.current = window.setTimeout(() => {
+      setPlaybackFeedback(null);
+      playbackFeedbackHideTimerRef.current = null;
+    }, 720);
+  }
+
+  function clearNativeVideoRefreshTimers() {
+    nativeVideoRefreshTimersRef.current.forEach((timerId) =>
+      window.clearTimeout(timerId),
+    );
+    nativeVideoRefreshTimersRef.current = [];
+  }
+
+  function requestNativeVideoRedraw() {
+    if (!isNativeMpvSource) {
+      return;
+    }
+
+    clearNativeVideoRefreshTimers();
+    const refreshDelays = [0, 90, 240, 520];
+    nativeVideoRefreshTimersRef.current = refreshDelays.map((delay) =>
+      window.setTimeout(() => {
+        nativeVideoMarginUpdateRef.current?.();
+        void mpvCommand('redraw-frame').catch(() => {
+          // Older mpv builds may not expose redraw-frame; the margin update still applies.
+        });
+      }, delay),
+    );
+  }
+
+  useEffect(() => {
+    return () => {
+      clearPlaybackControlsHideTimer();
+      clearPlaybackFeedbackHideTimer();
+      clearNativeVideoRefreshTimers();
+    };
+  }, []);
+
   function resetForNewVideo(
     nextVideo: VideoSource,
     nextNotice: string,
     options?: VideoOpenOptions,
   ) {
     const nextPanelVisible = options?.panelVisible ?? shouldOpenPanelOnVideoReady;
+    clearPlaybackControlsHideTimer();
+    setPlaybackControlsVisible(true);
+    schedulePlaybackControlsHide();
+    if (mpvStatus === 'ready' && (videoSource?.kind === 'mpv' || nextVideo.kind === 'mpv')) {
+      void mpvCommand('stop').catch(() => {
+        // Ignore stop errors while swapping media sources.
+      });
+    }
     resetMediaElementBeforeSourceSwap();
     setVideoSource(nextVideo);
     setSubtitleTrack(null);
@@ -928,6 +1217,15 @@ export default function App() {
     preparingAudioPromisesRef.current = {};
     setActiveCueIndex(-1);
     setVideoAspectRatio(null);
+    setMpvTimePos(0);
+    setMpvDuration(0);
+    setMpvFilename(null);
+    setMpvFileLoadedTick(0);
+    setMpvEndFileTick(0);
+    handledMpvFileLoadedTickRef.current = 0;
+    if (nextVideo.kind === 'mpv') {
+      mpvFallbackPathRef.current = null;
+    }
     setPanelTab(options?.panelTab ?? 'load');
     setPanelVisible(nextPanelVisible);
     videoReadyPanelBehaviorRef.current = options?.panelTab
@@ -953,6 +1251,20 @@ export default function App() {
     const fileName = getBaseName(path);
 
     try {
+      if (isDesktopApp()) {
+        resetForNewVideo(
+          {
+            src: path,
+            fileName,
+            kind: 'mpv',
+            path,
+          },
+          messages.notices.videoDetected(fileName),
+          options,
+        );
+        return;
+      }
+
       if (shouldUseStreamingPlayback(fileName)) {
         setNotice(messages.notices.videoPreparing(fileName));
         const streamSource = await invoke<TsStreamSource>('prepare_hls_stream', {
@@ -989,6 +1301,138 @@ export default function App() {
       );
     }
   }
+
+  useEffect(() => {
+    if (!isDesktopApp()) {
+      setMpvStatus('disabled');
+      return;
+    }
+
+    if (videoSource?.kind !== 'mpv' || !videoSource.path) {
+      setMpvStatus('loading');
+      return;
+    }
+
+    let active = true;
+    let unlistenEventsPromise: Promise<UnlistenFn> | undefined;
+    let unlistenPropertiesPromise: Promise<UnlistenFn> | undefined;
+
+    async function initializeMpv() {
+      try {
+        await destroyMpv().catch(() => undefined);
+
+        unlistenEventsPromise = listenMpvEvents((event) => {
+          if (!active) {
+            return;
+          }
+
+          if (event.event === 'file-loaded') {
+            setMpvFileLoadedTick((currentValue) => currentValue + 1);
+          }
+
+          if (event.event === 'end-file' && event.reason === 'eof') {
+            setMpvEndFileTick((currentValue) => currentValue + 1);
+          }
+        });
+
+        unlistenPropertiesPromise = observeMpvProperties(
+          MPV_OBSERVED_PROPERTIES,
+          (event) => {
+            if (!active) {
+              return;
+            }
+
+            switch (event.name) {
+              case 'pause':
+                setMpvPaused(Boolean(event.data));
+                break;
+              case 'time-pos':
+                setMpvTimePos(
+                  typeof event.data === 'number' && Number.isFinite(event.data)
+                    ? Math.max(0, event.data)
+                    : 0,
+                );
+                break;
+              case 'duration':
+                setMpvDuration(
+                  typeof event.data === 'number' && Number.isFinite(event.data)
+                    ? Math.max(0, event.data)
+                    : 0,
+                );
+                break;
+              case 'volume':
+                setMpvVolume(
+                  typeof event.data === 'number' && Number.isFinite(event.data)
+                    ? clamp(event.data / 100, 0, 1)
+                    : 1,
+                );
+                break;
+              case 'mute':
+                setMpvMuted(Boolean(event.data));
+                break;
+              case 'speed':
+                setMpvPlaybackRate(
+                  typeof event.data === 'number' && Number.isFinite(event.data)
+                    ? clamp(event.data, 0.25, 4)
+                    : 1,
+                );
+                break;
+              case 'filename':
+                setMpvFilename(typeof event.data === 'string' ? event.data : null);
+                break;
+              case 'video-params/w':
+                setMpvVideoWidth(
+                  typeof event.data === 'number' && Number.isFinite(event.data)
+                    ? Math.max(0, event.data)
+                    : 0,
+                );
+                break;
+              case 'video-params/h':
+                setMpvVideoHeight(
+                  typeof event.data === 'number' && Number.isFinite(event.data)
+                    ? Math.max(0, event.data)
+                    : 0,
+                );
+                break;
+              default:
+                break;
+            }
+          },
+        );
+
+        await initMpv({
+          initialOptions: {
+            vo: 'gpu-next',
+            hwdec: 'auto-safe',
+            'keep-open': 'yes',
+            'force-window': 'yes',
+            pause: 'yes',
+          },
+          observedProperties: MPV_OBSERVED_PROPERTIES,
+        });
+
+        if (active) {
+          setMpvStatus('ready');
+        }
+      } catch (error) {
+        if (active) {
+          console.error('[Noir mpv] initialization failed', error);
+          setMpvStatus('failed');
+        }
+      }
+    }
+
+    void initializeMpv();
+
+    return () => {
+      active = false;
+      void unlistenEventsPromise?.then((unlisten) => unlisten());
+      void unlistenPropertiesPromise?.then((unlisten) => unlisten());
+      void destroyMpv().catch(() => {
+        // Ignore shutdown errors while closing the desktop app.
+      });
+    };
+  }, [videoSource?.kind]);
 
   function applyPendingSyncplayState(
     videoElement: HTMLVideoElement,
@@ -1043,9 +1487,383 @@ export default function App() {
     return appliedPlaybackState;
   }
 
+  async function applyPendingSyncplayStateToMpv(
+    sourcePath?: string,
+  ): Promise<boolean> {
+    const pending = syncplayPendingStateRef.current;
+    if (pending.openPath && !areFilePathsEqual(pending.openPath, sourcePath)) {
+      return false;
+    }
+
+    let appliedPlaybackState = false;
+    if (pending.rate !== null && Number.isFinite(pending.rate)) {
+      await setMpvProperty('speed', clamp(pending.rate, 0.25, 4));
+      pending.rate = null;
+      appliedPlaybackState = true;
+    }
+
+    if (pending.position !== null && Number.isFinite(pending.position)) {
+      await mpvCommand('seek', [Math.max(0, pending.position), 'absolute', 'exact']);
+      pending.position = null;
+      appliedPlaybackState = true;
+    }
+
+    if (pending.paused !== null) {
+      await setMpvProperty('pause', pending.paused);
+      pending.paused = null;
+      appliedPlaybackState = true;
+    }
+
+    if (pending.openPath && areFilePathsEqual(pending.openPath, sourcePath)) {
+      pending.openPath = null;
+    }
+
+    return appliedPlaybackState;
+  }
+
+  useEffect(() => {
+    if (
+      mpvStatus !== 'ready' ||
+      videoSource?.kind !== 'mpv' ||
+      !videoSource.path
+    ) {
+      return;
+    }
+
+    let active = true;
+    const sourcePath = videoSource.path;
+
+    void (async () => {
+      try {
+        const mpvSource = toMpvFileUrl(sourcePath);
+        await mpvCommand('loadfile', [mpvSource, 'replace']);
+
+        for (let attempt = 0; attempt < 100 && active; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 100));
+          let filename: string | null = null;
+          try {
+            filename = await getMpvProperty('filename', 'string');
+          } catch {
+            continue;
+          }
+          if (typeof filename !== 'string' || !filename) {
+            continue;
+          }
+
+          setMpvFilename(filename);
+          const [duration, width, height] = await Promise.all([
+            getMpvProperty('duration', 'double').catch(() => null),
+            getMpvProperty('video-params/w', 'int64').catch(() => null),
+            getMpvProperty('video-params/h', 'int64').catch(() => null),
+          ]);
+          if (typeof duration === 'number' && Number.isFinite(duration)) {
+            setMpvDuration(Math.max(0, duration));
+          }
+          if (typeof width === 'number' && Number.isFinite(width)) {
+            setMpvVideoWidth(Math.max(0, width));
+          }
+          if (typeof height === 'number' && Number.isFinite(height)) {
+            setMpvVideoHeight(Math.max(0, height));
+          }
+          setMpvFileLoadedTick((currentValue) =>
+            currentValue > 0 ? currentValue : 1,
+          );
+          return;
+        }
+
+        if (active) {
+          setNotice(messagesRef.current.notices.diskReadFailed(videoSource.fileName));
+        }
+      } catch (error) {
+        console.error('[Noir mpv] failed to load file', error);
+        if (active) {
+          setNotice(messagesRef.current.notices.diskReadFailed(videoSource.fileName));
+        }
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [mpvStatus, videoSource?.fileName, videoSource?.kind, videoSource?.path]);
+
+  useEffect(() => {
+    if (
+      mpvStatus !== 'failed' ||
+      videoSource?.kind !== 'mpv' ||
+      !videoSource.path
+    ) {
+      return;
+    }
+
+    let active = true;
+    const sourcePath = videoSource.path;
+    if (mpvFallbackPathRef.current === sourcePath) {
+      return;
+    }
+    mpvFallbackPathRef.current = sourcePath;
+    const preservedPlaybackState =
+      preservedPlaybackStateRef.current || capturePlaybackState();
+    const openOptions: VideoOpenOptions = {
+      panelTab,
+      panelVisible,
+      playOnReady: playOnReadyRef.current,
+      applyOpenPreferences: applyOpenPreferencesRef.current,
+      preservePlaybackState: preservedPlaybackState,
+    };
+
+    setNotice(messages.notices.nativeMpvUnavailable);
+    void invoke<string>('prepare_video_playback_source', { path: sourcePath })
+      .then((preparedPath) => {
+        if (!active || videoSource?.path !== sourcePath) {
+          return;
+        }
+
+        resetForNewVideo(
+          {
+            src: convertFileSrc(preparedPath),
+            fileName: videoSource.fileName,
+            kind: 'path',
+            path: sourcePath,
+          },
+          messages.notices.videoDetected(videoSource.fileName),
+          openOptions,
+        );
+      })
+      .catch(() => {
+        if (active) {
+          setNotice(messages.notices.diskReadFailed(videoSource.fileName));
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [
+    messages,
+    mpvStatus,
+    panelTab,
+    panelVisible,
+    videoSource?.fileName,
+    videoSource?.kind,
+    videoSource?.path,
+  ]);
+
+  useEffect(() => {
+    if (
+      mpvStatus !== 'ready' ||
+      videoSource?.kind !== 'mpv' ||
+      !videoSource.path ||
+      mpvFileLoadedTick === 0
+    ) {
+      return;
+    }
+
+    if (handledMpvFileLoadedTickRef.current === mpvFileLoadedTick) {
+      return;
+    }
+
+    if (
+      mpvFilename &&
+      !areFilePathsEqual(mpvFilename, videoSource.path) &&
+      !areFilePathsEqual(decodeMpvFilePath(mpvFilename), videoSource.path)
+    ) {
+      return;
+    }
+
+    handledMpvFileLoadedTickRef.current = mpvFileLoadedTick;
+    requestNativeVideoRedraw();
+
+    const preservedPlaybackState = preservedPlaybackStateRef.current;
+    const shouldApplyOpenPreferences = applyOpenPreferencesRef.current;
+    const pendingSyncplayPaused = syncplayPendingStateRef.current.paused;
+    const panelBehavior = videoReadyPanelBehaviorRef.current;
+    const shouldForcePlayOnReady = playOnReadyRef.current;
+
+    applyOpenPreferencesRef.current = true;
+    playOnReadyRef.current = false;
+
+    if (preservedPlaybackState) {
+      void setMpvProperty('volume', preservedPlaybackState.volume * 100);
+      void setMpvProperty('mute', preservedPlaybackState.muted);
+      void setMpvProperty('speed', preservedPlaybackState.playbackRate);
+      preservedPlaybackStateRef.current = null;
+    }
+
+    if (panelBehavior) {
+      setPanelVisible(panelBehavior.panelVisible);
+      setPanelTab(panelBehavior.panelTab);
+      videoReadyPanelBehaviorRef.current = null;
+    } else if (shouldApplyOpenPreferences) {
+      setPanelVisible(shouldOpenPanelOnVideoReady);
+      setPanelTab('load');
+    }
+
+    void (async () => {
+      const syncplayPlaybackApplied = await applyPendingSyncplayStateToMpv(
+        videoSource.path,
+      );
+      const shouldPlayOnReady = syncplayPlaybackApplied
+        ? pendingSyncplayPaused === false ||
+          (pendingSyncplayPaused === null && !mpvPlaybackStateRef.current.paused)
+        : shouldForcePlayOnReady ||
+          (shouldApplyOpenPreferences && autoplayOnOpen);
+
+      await setMpvProperty('pause', !shouldPlayOnReady);
+      refreshEmbeddedSubtitleTracks();
+      void refreshMediaSubtitleTracks(videoSource.path);
+      void refreshAudioTracks(videoSource.path);
+      updateSubtitleCue();
+
+      setNotice(
+        shouldApplyOpenPreferences && promptForSubtitles && !shouldForcePlayOnReady
+          ? messagesRef.current.notices.videoReadyPrompt(videoSource.fileName)
+          : shouldPlayOnReady
+            ? messagesRef.current.notices.videoReadyPlaying(videoSource.fileName)
+            : messagesRef.current.notices.videoReadyPaused(videoSource.fileName),
+      );
+
+      if (shouldApplyOpenPreferences && fullscreenOnOpen) {
+        await applyNativeFullscreen(true);
+      }
+    })().catch(() => {
+      setNotice(messagesRef.current.notices.diskReadFailed(videoSource.fileName));
+    });
+  }, [
+    autoplayOnOpen,
+    fullscreenOnOpen,
+    mpvFileLoadedTick,
+    mpvFilename,
+    mpvStatus,
+    promptForSubtitles,
+    shouldOpenPanelOnVideoReady,
+    videoSource,
+  ]);
+
+  useEffect(() => {
+    if (
+      !isNativeMpvSource ||
+      mpvVideoWidth <= 0 ||
+      mpvVideoHeight <= 0
+    ) {
+      return;
+    }
+
+    setVideoAspectRatio(mpvVideoWidth / mpvVideoHeight);
+  }, [isNativeMpvSource, mpvVideoHeight, mpvVideoWidth]);
+
+  useEffect(() => {
+    if (
+      mpvStatus !== 'ready' ||
+      videoSource?.kind !== 'mpv' ||
+      mpvEndFileTick === 0
+    ) {
+      return;
+    }
+
+    if (endPlaybackAction === 'repeat') {
+      void mpvCommand('seek', [0, 'absolute', 'exact'])
+        .then(() => setMpvProperty('pause', false))
+        .catch(() => undefined);
+      return;
+    }
+
+    if (endPlaybackAction !== 'next' || !videoSource.path) {
+      return;
+    }
+
+    const currentPlaylistIndex = playlistVideos.findIndex((playlistVideo) =>
+      areFilePathsEqual(playlistVideo.path, videoSource.path),
+    );
+    const nextPlaylistVideo =
+      currentPlaylistIndex >= 0
+        ? playlistVideos[currentPlaylistIndex + 1]
+        : null;
+    if (!nextPlaylistVideo) {
+      return;
+    }
+
+    void openVideoFromPath(nextPlaylistVideo.path, {
+      panelTab,
+      panelVisible,
+      playOnReady: true,
+      applyOpenPreferences: false,
+      preservePlaybackState: capturePlaybackState(),
+    });
+  }, [
+    endPlaybackAction,
+    mpvEndFileTick,
+    mpvStatus,
+    panelTab,
+    panelVisible,
+    playlistVideos,
+    videoSource,
+  ]);
+
+  useEffect(() => {
+    if (
+      mpvStatus !== 'ready' ||
+      videoSource?.kind !== 'mpv' ||
+      !playerFrameRef.current
+    ) {
+      return;
+    }
+
+    const updateVideoMargin = () => {
+      const rect = playerFrameRef.current?.getBoundingClientRect();
+      if (!rect || window.innerWidth <= 0 || window.innerHeight <= 0) {
+        return;
+      }
+
+      void setVideoMarginRatio({
+        left: clamp(rect.left / window.innerWidth, 0, 1),
+        right: clamp(1 - rect.right / window.innerWidth, 0, 1),
+        top: clamp(rect.top / window.innerHeight, 0, 1),
+        bottom: clamp(1 - rect.bottom / window.innerHeight, 0, 1),
+      }).catch(() => {
+        // Ignore margin updates while the native mpv window is changing size.
+      });
+    };
+    nativeVideoMarginUpdateRef.current = updateVideoMargin;
+
+    let animationFrame = 0;
+    const scheduleUpdate = () => {
+      window.cancelAnimationFrame(animationFrame);
+      animationFrame = window.requestAnimationFrame(updateVideoMargin);
+    };
+    const resizeObserver = new ResizeObserver(scheduleUpdate);
+    resizeObserver.observe(playerFrameRef.current);
+    window.addEventListener('resize', scheduleUpdate);
+    scheduleUpdate();
+
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener('resize', scheduleUpdate);
+      window.cancelAnimationFrame(animationFrame);
+      if (nativeVideoMarginUpdateRef.current === updateVideoMargin) {
+        nativeVideoMarginUpdateRef.current = null;
+      }
+      void setVideoMarginRatio({ left: 0, right: 0, top: 0, bottom: 0 }).catch(
+        () => undefined,
+      );
+    };
+  }, [
+    mpvStatus,
+    nativeFullscreen,
+    videoAspectRatio,
+    videoSource?.kind,
+    videoSource?.path,
+  ]);
+
+  useEffect(() => {
+    if (videoSource?.kind === 'mpv') {
+      updateSubtitleCue();
+    }
+  }, [mpvTimePos, subtitleTrack, syncOffsetMs, videoSource?.kind]);
+
   function openVideoFromFile(file: File) {
     const nativePath = (file as File & { path?: string }).path;
-    if (nativePath && shouldUseStreamingPlayback(file.name)) {
+    if (nativePath && isVideoFileName(file.name)) {
       void openVideoFromPath(nativePath);
       return;
     }
@@ -1239,7 +2057,89 @@ export default function App() {
     });
   }
 
+  async function togglePlayback() {
+    revealPlaybackControls();
+
+    if (isNativeMpvSource) {
+      const nextPaused = !mpvPaused;
+      try {
+        await setMpvProperty('pause', nextPaused);
+        showPlaybackFeedback(nextPaused ? 'pause' : 'play');
+      } catch {
+        // Keep the current state when mpv rejects a command during a resize.
+      }
+      return;
+    }
+
+    const videoElement = videoElementRef.current;
+    if (!videoElement) {
+      return;
+    }
+
+    if (videoElement.paused || videoElement.ended) {
+      try {
+        await videoElement.play();
+        showPlaybackFeedback('play');
+      } catch {
+        // Autoplay restrictions can reject this; the native controls remain available.
+      }
+      return;
+    }
+
+    videoElement.pause();
+    showPlaybackFeedback('pause');
+  }
+
+  function isPlayerInteractiveTarget(target: EventTarget | null): boolean {
+    return (
+      target instanceof HTMLElement &&
+      Boolean(target.closest('button, input, select, textarea, a, [data-player-control]'))
+    );
+  }
+
+  function handlePlayerClick(event: MouseEvent<HTMLDivElement>) {
+    if (isPlayerInteractiveTarget(event.target)) {
+      return;
+    }
+
+    void togglePlayback();
+  }
+
+  function handlePlayerDoubleClick(event: MouseEvent<HTMLDivElement>) {
+    if (isPlayerInteractiveTarget(event.target)) {
+      return;
+    }
+
+    void togglePlayerFullscreen();
+  }
+
+  async function applyNativeFullscreen(nextFullscreen: boolean) {
+    try {
+      const currentWindow = getCurrentWindow();
+      await currentWindow.setFullscreen(nextFullscreen);
+      const confirmedFullscreen = await currentWindow
+        .isFullscreen()
+        .catch(() => nextFullscreen);
+      setNativeFullscreen(confirmedFullscreen);
+      revealPlaybackControls();
+
+      await new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(resolve);
+        });
+      });
+      requestNativeVideoRedraw();
+    } catch (error) {
+      console.error('[Noir window] fullscreen transition failed', error);
+    }
+  }
+
   async function exitPlayerFullscreen() {
+    if (isNativeMpvSource || nativeFullscreen) {
+      await applyNativeFullscreen(false);
+      return;
+    }
+
     if (document.fullscreenElement && document.visibilityState === 'visible') {
       await document.exitFullscreen().catch(() => {
         // Keep changing the video even if the platform refuses the exit.
@@ -1247,7 +2147,71 @@ export default function App() {
     }
   }
 
+  async function toggleNativeFullscreen() {
+    await applyNativeFullscreen(!nativeFullscreen);
+  }
+
+  async function togglePlayerFullscreen() {
+    if (isNativeMpvSource) {
+      await toggleNativeFullscreen();
+      return;
+    }
+
+    try {
+      if (playerRef.current) {
+        playerRef.current.fullscreen.toggle();
+        return;
+      }
+
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await playerFrameRef.current?.requestFullscreen();
+      }
+    } catch {
+      // Fullscreen can be denied by the browser until a user gesture is received.
+    }
+  }
+
+  useEffect(() => {
+    if (!isDesktopApp() && !videoSource) {
+      return;
+    }
+
+    const handleFullscreenShortcut = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.isContentEditable ||
+        ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName || '')
+      ) {
+        return;
+      }
+
+      if (event.key === 'F11' && isNativeMpvSource) {
+        event.preventDefault();
+        void toggleNativeFullscreen();
+      } else if (event.key === 'Escape' && nativeFullscreen) {
+        event.preventDefault();
+        void exitPlayerFullscreen();
+      } else if (event.key.toLowerCase() === 'f') {
+        event.preventDefault();
+        void togglePlayerFullscreen();
+      }
+    };
+
+    window.addEventListener('keydown', handleFullscreenShortcut);
+    return () => window.removeEventListener('keydown', handleFullscreenShortcut);
+  }, [isNativeMpvSource, nativeFullscreen, videoSource]);
+
   function capturePlaybackState(): PlaybackStateSnapshot | undefined {
+    if (isNativeMpvSource) {
+      return {
+        volume: mpvVolume,
+        muted: mpvMuted,
+        playbackRate: mpvPlaybackRate,
+      };
+    }
+
     const videoElement = videoElementRef.current;
     if (!videoElement) {
       return undefined;
@@ -1767,6 +2731,13 @@ export default function App() {
     setPanelTab('playlist');
 
     if (areFilePathsEqual(playlistVideo.path, videoSource?.path)) {
+      if (isNativeMpvSource) {
+        await setMpvProperty('pause', false).catch(() => {
+          // The native controls remain available when mpv rejects a command.
+        });
+        return;
+      }
+
       const playPromise = videoElementRef.current?.play();
       if (playPromise) {
         await playPromise.catch(() => {
@@ -1836,6 +2807,16 @@ export default function App() {
     trackOption: NativeAudioTrackOption,
     sourcePathOverride?: string,
   ) {
+    if (isNativeMpvSource) {
+      try {
+        await setMpvProperty('aid', trackOption.order + 1);
+        setActiveAudioTrackId(trackOption.id);
+      } catch {
+        setNotice(messages.notices.audioTrackUnavailable);
+      }
+      return;
+    }
+
     const browserAudioTracks = getBrowserAudioTracks();
     const sourcePath = sourcePathOverride || videoSource?.path;
 
@@ -1943,13 +2924,12 @@ export default function App() {
   }
 
   function updateSubtitleCue() {
-    const video = videoElementRef.current;
-    if (!video || !subtitleTrack) {
+    if (!subtitleTrack) {
       setActiveCueIndex(-1);
       return;
     }
 
-    const playbackMs = video.currentTime * 1000 - syncOffsetMs;
+    const playbackMs = currentPlaybackTime * 1000 - syncOffsetMs;
     const nextCueIndex = findActiveCueIndex(subtitleTrack.cues, playbackMs);
     setActiveCueIndex((currentCueIndex) =>
       currentCueIndex === nextCueIndex ? currentCueIndex : nextCueIndex,
@@ -1965,12 +2945,11 @@ export default function App() {
   }
 
   function syncRelativeCueToCurrentTime(direction: 'prev' | 'next') {
-    const video = videoElementRef.current;
-    if (!video || !subtitleTrack) {
+    if (!videoSource || !subtitleTrack) {
       return;
     }
 
-    const currentPlaybackMs = video.currentTime * 1000;
+    const currentPlaybackMs = currentPlaybackTime * 1000;
     const referencePlaybackMs = currentPlaybackMs - syncOffsetMs;
     const currentCueIndex = findActiveCueIndex(
       subtitleTrack.cues,
@@ -2368,6 +3347,7 @@ export default function App() {
     if (
       !videoSource?.path ||
       videoSource.kind === 'hls' ||
+      videoSource.kind === 'mpv' ||
       nativeAudioTracks.length === 0 ||
       externalAudioSource
     ) {
@@ -2394,6 +3374,7 @@ export default function App() {
     if (
       !videoSource?.path ||
       videoSource.kind === 'hls' ||
+      videoSource.kind === 'mpv' ||
       nativeAudioTracks.length === 0
     ) {
       return;
@@ -2532,7 +3513,9 @@ export default function App() {
               Number.isFinite(command.position)
             ) {
               pending.position = Math.max(0, command.position);
-              if (videoElementRef.current) {
+              if (videoSource?.kind === 'mpv') {
+                void applyPendingSyncplayStateToMpv(videoSource.path);
+              } else if (videoElementRef.current) {
                 applyPendingSyncplayState(videoElementRef.current, videoSource?.path);
               }
             }
@@ -2542,7 +3525,9 @@ export default function App() {
           if (command.command === 'rate') {
             if (typeof command.rate === 'number' && Number.isFinite(command.rate)) {
               pending.rate = command.rate;
-              if (videoElementRef.current) {
+              if (videoSource?.kind === 'mpv') {
+                void applyPendingSyncplayStateToMpv(videoSource.path);
+              } else if (videoElementRef.current) {
                 applyPendingSyncplayState(videoElementRef.current, videoSource?.path);
               }
             }
@@ -2551,7 +3536,9 @@ export default function App() {
 
           if (command.command === 'play' || command.command === 'pause') {
             pending.paused = command.command === 'pause';
-            if (videoElementRef.current) {
+            if (videoSource?.kind === 'mpv') {
+              void applyPendingSyncplayStateToMpv(videoSource.path);
+            } else if (videoElementRef.current) {
               applyPendingSyncplayState(videoElementRef.current, videoSource?.path);
             }
           }
@@ -2572,28 +3559,37 @@ export default function App() {
   useEffect(() => {
     const reportStatus = () => {
       const videoElement = videoElementRef.current;
+      const nativePlaybackState = mpvPlaybackStateRef.current;
       const hasMetadata = Boolean(
         videoSource &&
-          videoElement &&
-          videoElement.readyState >= HTMLMediaElement.HAVE_METADATA,
+          (isNativeMpvSource
+            ? mpvFileLoadedTick > 0
+            : videoElement &&
+              videoElement.readyState >= HTMLMediaElement.HAVE_METADATA),
       );
-      const position =
-        videoElement && Number.isFinite(videoElement.currentTime)
+      const position = isNativeMpvSource
+        ? nativePlaybackState.timePos
+        : videoElement && Number.isFinite(videoElement.currentTime)
           ? Math.max(0, videoElement.currentTime)
           : 0;
-      const duration =
-        videoElement && Number.isFinite(videoElement.duration)
+      const duration = isNativeMpvSource
+        ? nativePlaybackState.duration
+        : videoElement && Number.isFinite(videoElement.duration)
           ? Math.max(0, videoElement.duration)
           : 0;
-      const rate =
-        videoElement && Number.isFinite(videoElement.playbackRate)
+      const rate = isNativeMpvSource
+        ? nativePlaybackState.playbackRate
+        : videoElement && Number.isFinite(videoElement.playbackRate)
           ? videoElement.playbackRate
           : 1;
+      const paused = isNativeMpvSource
+        ? nativePlaybackState.paused
+        : videoElement?.paused ?? true;
 
       void invoke('syncplay_update_status', {
         status: {
           loaded: hasMetadata,
-          paused: videoElement?.paused ?? true,
+          paused,
           position,
           duration,
           rate,
@@ -2608,7 +3604,13 @@ export default function App() {
     reportStatus();
     const timerId = window.setInterval(reportStatus, 250);
     return () => window.clearInterval(timerId);
-  }, [videoSource?.fileName, videoSource?.path, videoSource?.src]);
+  }, [
+    isNativeMpvSource,
+    mpvFileLoadedTick,
+    videoSource?.fileName,
+    videoSource?.path,
+    videoSource?.src,
+  ]);
 
   useEffect(() => {
     let unlistenNativeDrop: UnlistenFn | undefined;
@@ -2684,7 +3686,7 @@ export default function App() {
 
   useEffect(() => {
     const videoElement = videoElementRef.current;
-    if (!videoElement || !videoSource) {
+    if (!videoElement || !videoSource || videoSource.kind === 'mpv') {
       return;
     }
 
@@ -2720,11 +3722,11 @@ export default function App() {
       playerRef.current?.destroy();
       playerRef.current = null;
     };
-  }, [Boolean(videoSource)]);
+  }, [videoSource?.kind]);
 
   useEffect(() => {
     const videoElement = videoElementRef.current;
-    if (!videoElement || !videoSource) {
+    if (!videoElement || !videoSource || videoSource.kind === 'mpv') {
       return;
     }
 
@@ -2792,7 +3794,7 @@ export default function App() {
 
   useEffect(() => {
     const videoElement = videoElementRef.current;
-    if (!videoElement || !videoSource) {
+    if (!videoElement || !videoSource || videoSource.kind === 'mpv') {
       return;
     }
 
@@ -2849,7 +3851,7 @@ export default function App() {
 
   useEffect(() => {
     const videoElement = videoElementRef.current;
-    if (!videoElement) {
+    if (!videoElement || videoSource?.kind === 'mpv') {
       return;
     }
 
@@ -3023,9 +4025,22 @@ export default function App() {
     videoSource,
   ]);
 
+  if (!desktopWindowReady) {
+    return (
+      <div className='app-splash' role='status' aria-live='polite'>
+        <div className='app-splash-card'>
+          <span className='app-splash-spinner' aria-hidden='true' />
+          <span>{messages.playlist.loading}</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
-      className={`app-shell ${pageDropActive ? 'page-drop-active' : ''}`}
+      className={`app-shell ${isDesktopApp() ? 'app-shell-native' : ''} ${
+        nativeFullscreen ? 'app-shell-native-fullscreen' : ''
+      } ${pageDropActive ? 'page-drop-active' : ''}`}
       data-drop-message={dropOverlayMessage}
       onDragEnter={(event) => {
         if (!transferHasFiles(event.dataTransfer)) {
@@ -3267,16 +4282,148 @@ export default function App() {
               </div>
             </div>
 
-            <div className='player-card'>
-              <div className='player-frame' style={playerFrameStyle}>
-                <video
-                  ref={videoElementRef}
-                  className='player-video'
-                  src={videoSource.kind === 'hls' ? undefined : videoSource.src}
-                  preload='auto'
-                  playsInline
-                />
+            <div className={`player-card ${isNativeMpvSource ? 'player-card-native' : ''}`}>
+              <div
+                ref={playerFrameRef}
+                className={`player-frame ${isNativeMpvSource ? 'player-frame-native' : ''} ${
+                  playbackControlsVisible
+                    ? 'playback-controls-visible'
+                    : 'playback-controls-hidden'
+                }`}
+                style={playerFrameStyle}
+                onClick={handlePlayerClick}
+                onDoubleClick={handlePlayerDoubleClick}
+                onPointerEnter={revealPlaybackControls}
+                onPointerMove={revealPlaybackControls}
+                onPointerLeave={() => schedulePlaybackControlsHide(1800)}
+                onFocusCapture={revealPlaybackControls}
+              >
+                {isNativeMpvSource ? null : (
+                  <video
+                    ref={videoElementRef}
+                    className='player-video'
+                    src={videoSource.kind === 'hls' ? undefined : videoSource.src}
+                    preload='auto'
+                    playsInline
+                  />
+                )}
                 <audio ref={externalAudioRef} className='hidden-audio' preload='auto' />
+
+                {isNativeMpvSource ? (
+                  <div
+                    className='playback-activity-surface'
+                    aria-hidden='true'
+                    onPointerEnter={revealPlaybackControls}
+                    onPointerMove={revealPlaybackControls}
+                    onPointerLeave={() => schedulePlaybackControlsHide(1800)}
+                  />
+                ) : null}
+
+                {playbackFeedback ? (
+                  <div
+                    className={`playback-feedback playback-feedback-${playbackFeedback}`}
+                    aria-hidden='true'
+                  >
+                    {playbackFeedback === 'play' ? (
+                      <Play size={34} strokeWidth={2.2} />
+                    ) : (
+                      <Pause size={34} strokeWidth={2.2} />
+                    )}
+                  </div>
+                ) : null}
+
+                {isNativeMpvSource ? (
+                  <div
+                    className='native-control-bar'
+                    data-player-control
+                    onClick={(event) => event.stopPropagation()}
+                    onDoubleClick={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                  >
+                    <button
+                      type='button'
+                      className='native-control-button'
+                      data-player-control
+                      aria-label={mpvPaused ? 'Play' : 'Pause'}
+                      title={mpvPaused ? 'Play' : 'Pause'}
+                      onClick={() =>
+                        void togglePlayback()
+                      }
+                    >
+                      {mpvPaused ? (
+                        <Play size={20} strokeWidth={2.4} aria-hidden='true' />
+                      ) : (
+                        <Pause size={20} strokeWidth={2.4} aria-hidden='true' />
+                      )}
+                    </button>
+                    <input
+                      className='native-progress'
+                      data-player-control
+                      type='range'
+                      min={0}
+                      max={Math.max(0, mpvDuration)}
+                      step={0.01}
+                      value={Math.min(mpvTimePos, Math.max(0, mpvDuration))}
+                      disabled={mpvDuration <= 0}
+                      aria-label='Seek'
+                      onChange={(event) =>
+                        void mpvCommand('seek', [
+                          Number(event.target.value),
+                          'absolute',
+                          'exact',
+                        ]).catch(() => undefined)
+                      }
+                    />
+                    <span className='native-time-readout'>
+                      {formatPlaybackTime(mpvTimePos)} / {formatPlaybackTime(mpvDuration)}
+                    </span>
+                    <button
+                      type='button'
+                      className='native-control-button'
+                      data-player-control
+                      aria-label={mpvMuted ? 'Unmute' : 'Mute'}
+                      title={mpvMuted ? 'Unmute' : 'Mute'}
+                      onClick={() =>
+                        void setMpvProperty('mute', !mpvMuted).catch(() => undefined)
+                      }
+                    >
+                      {mpvMuted ? (
+                        <VolumeX size={20} strokeWidth={2.2} aria-hidden='true' />
+                      ) : (
+                        <Volume2 size={20} strokeWidth={2.2} aria-hidden='true' />
+                      )}
+                    </button>
+                    <input
+                      className='native-volume'
+                      data-player-control
+                      type='range'
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      value={mpvVolume}
+                      aria-label='Volume'
+                      onChange={(event) =>
+                        void setMpvProperty('volume', Number(event.target.value) * 100).catch(
+                          () => undefined,
+                        )
+                      }
+                    />
+                    <button
+                      type='button'
+                      className='native-control-button native-fullscreen-button'
+                      data-player-control
+                      aria-label={nativeFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+                      title={nativeFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+                      onClick={() => void toggleNativeFullscreen()}
+                    >
+                      {nativeFullscreen ? (
+                        <Minimize2 size={20} strokeWidth={2.2} aria-hidden='true' />
+                      ) : (
+                        <Maximize2 size={20} strokeWidth={2.2} aria-hidden='true' />
+                      )}
+                    </button>
+                  </div>
+                ) : null}
 
                 <div
                   className={`caption-layer caption-layer-centered ${
@@ -3284,7 +4431,10 @@ export default function App() {
                       ? 'caption-layer-custom-width'
                       : 'caption-layer-auto-width'
                   }`}
+                  data-player-control
                   style={subtitleVariables}
+                  onClick={(event) => event.stopPropagation()}
+                  onDoubleClick={(event) => event.stopPropagation()}
                 >
                   {activeCue ? (
                     <span
@@ -3296,8 +4446,9 @@ export default function App() {
 
                 <div
                   className={`dock-shell ${dockVisible ? 'dock-shell-visible' : ''}`}
-                  onMouseEnter={() => setDockHovering(true)}
-                  onMouseLeave={() => setDockHovering(false)}
+                  data-player-control
+                  onClick={(event) => event.stopPropagation()}
+                  onDoubleClick={(event) => event.stopPropagation()}
                 >
                   <div className='dock-hover-zone' aria-hidden='true' />
                   <div className='floating-dock'>
@@ -3343,6 +4494,9 @@ export default function App() {
 
                 <aside
                   className={`control-panel ${panelVisible ? 'control-panel-open' : ''}`}
+                  data-player-control
+                  onClick={(event) => event.stopPropagation()}
+                  onDoubleClick={(event) => event.stopPropagation()}
                 >
                   <div className='panel-tabs'>
                     <button

@@ -7,6 +7,10 @@
   ],
   "permissions": [
     "core:default",
-    "dialog:default"
+    "core:window:allow-show",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-is-fullscreen",
+    "dialog:default",
+    "libmpv:default"
   ]
 }

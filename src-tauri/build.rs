@@ -1,3 +1,40 @@
+use std::{env, fs, path::PathBuf};
+
 fn main() {
-    tauri_build::build()
+    println!("cargo:rerun-if-changed=lib/libmpv-2.dll");
+    println!("cargo:rerun-if-changed=lib/libmpv-wrapper.dll");
+
+    stage_development_libraries();
+    tauri_build::build();
+}
+
+fn stage_development_libraries() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let Ok(out_dir) = env::var("OUT_DIR") else {
+        return;
+    };
+
+    let out_dir = PathBuf::from(out_dir);
+    let Some(profile_dir) = out_dir.ancestors().nth(3) else {
+        return;
+    };
+
+    let source_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("lib");
+    let destination_dir = profile_dir.join("lib");
+
+    for library_name in ["libmpv-2.dll", "libmpv-wrapper.dll"] {
+        let source = source_dir.join(library_name);
+        let destination = destination_dir.join(library_name);
+
+        if !source.is_file() {
+            continue;
+        }
+
+        if fs::create_dir_all(&destination_dir).is_ok() {
+            let _ = fs::copy(source, destination);
+        }
+    }
 }

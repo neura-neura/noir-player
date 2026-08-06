@@ -60,6 +60,12 @@ That means:
 - Supports switching between detected audio tracks
 - Uses bundled `ffmpeg` / `ffprobe` as fallback for codecs that the WebView may not decode directly, including common cases such as `EAC3`
 
+## Current Video Support
+
+- Desktop playback uses native `libmpv` with GPU-accelerated decoding when available, including HEVC/H.265 and 10/12/14/16-bit video
+- React controls, custom subtitles, playlist behavior, and Syncplay commands remain in the WebView UI
+- If the native DLLs are unavailable, the app falls back to its FFmpeg-compatible playback path
+
 ## Tech Stack
 
 - Tauri 2
@@ -283,6 +289,12 @@ The repository should not contain API keys, tokens, passwords, or local secret f
 - Try switching audio tracks from the panel.
 - If the track uses a codec such as `EAC3`, the app may prepare a compatible fallback track first.
 - Wait a moment after opening a large file so the bundled audio fallback can prepare in the background.
+
+### The video has audio but the picture is black
+
+- Desktop builds use native libmpv playback instead of WebView2 for the video surface.
+- Run `npx tauri-plugin-libmpv-api setup-lib` after cloning and include `src-tauri/lib/libmpv-wrapper.dll` and `src-tauri/lib/libmpv-2.dll` in packaged builds.
+- If libmpv cannot load, the app falls back to FFmpeg and may prepare a compatible copy.
 
 ### Embedded subtitles are detected but do not look identical to the source
 

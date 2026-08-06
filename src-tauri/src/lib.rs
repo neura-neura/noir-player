@@ -22,7 +22,7 @@ use winreg::{
 const SUPPORTED_VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "mkv", "avi", "mov", "m4v", "webm", "ts", "m2ts", "wmv", "flv",
 ];
-const PLAYBACK_CACHE_VERSION: &str = "ts-h264-aac-v2";
+const PLAYBACK_CACHE_VERSION: &str = "browser-h264-aac-v1";
 const HLS_CACHE_VERSION: &str = "ts-hls-segments-v1";
 const HLS_SEGMENT_SECONDS: f64 = 2.0;
 const SYNCPLAY_CONTROL_ADDR: &str = "127.0.0.1:32123";
@@ -131,6 +131,8 @@ struct FfprobeStream {
     #[serde(default)]
     codec_name: Option<String>,
     #[serde(default)]
+    pix_fmt: Option<String>,
+    #[serde(default)]
     tags: Option<FfprobeStreamTags>,
 }
 
@@ -169,6 +171,46 @@ fn is_transport_stream_path(path: &str) -> bool {
         .and_then(|extension| extension.to_str())
         .map(|extension| matches!(extension.to_ascii_lowercase().as_str(), "ts" | "m2ts"))
         .unwrap_or(false)
+}
+
+fn video_stream_requires_browser_fallback(stream: &FfprobeStream) -> bool {
+    let codec_name = stream
+        .codec_name
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let pixel_format = stream
+        .pix_fmt
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+
+    let browser_unreliable_codec = matches!(
+        codec_name.as_str(),
+        "hevc"
+            | "h265"
+            | "av1"
+            | "av01"
+            | "mpeg1video"
+            | "mpeg2video"
+            | "vc1"
+            | "wmv3"
+            | "prores"
+            | "dnxhd"
+            | "dnxhr"
+            | "ffv1"
+            | "huffyuv"
+            | "rawvideo"
+            | "jpeg2000"
+    );
+    let high_bit_depth = ["10", "12", "14", "16"]
+        .iter()
+        .any(|marker| pixel_format.contains(marker));
+    let unsupported_chroma = pixel_format.contains("422") || pixel_format.contains("444");
+
+    browser_unreliable_codec || high_bit_depth || unsupported_chroma
 }
 
 fn find_first_video_arg<I>(args: I) -> Option<String>
@@ -720,7 +762,7 @@ fn probe_streams(app: &AppHandle, path: &str) -> Result<Vec<FfprobeStream>, Stri
             "-v",
             "error",
             "-show_entries",
-            "stream=index,codec_type,codec_name:stream_tags=language,title",
+            "stream=index,codec_type,codec_name,pix_fmt:stream_tags=language,title",
             "-of",
             "json",
             path,
@@ -1229,7 +1271,21 @@ async fn prepare_video_playback_source(app: AppHandle, path: String) -> Result<S
             return Err("Video file not found.".into());
         }
 
-        if !is_transport_stream_path(&path) {
+        let requires_fallback = if is_transport_stream_path(&path) {
+            true
+        } else {
+            probe_streams(&app, &path)
+                .ok()
+                .and_then(|streams| {
+                    streams
+                        .into_iter()
+                        .find(|stream| stream.codec_type.as_deref() == Some("video"))
+                })
+                .map(|stream| video_stream_requires_browser_fallback(&stream))
+                .unwrap_or(false)
+        };
+
+        if !requires_fallback {
             return Ok(path);
         }
 
@@ -1309,7 +1365,7 @@ async fn prepare_video_playback_source(app: AppHandle, path: String) -> Result<S
             let _ = fs::remove_file(&partial_file);
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             return Err(if stderr.is_empty() {
-                "ffmpeg could not prepare that TS video for playback.".into()
+                "ffmpeg could not prepare that video for playback.".into()
             } else {
                 stderr
             });
@@ -1317,7 +1373,7 @@ async fn prepare_video_playback_source(app: AppHandle, path: String) -> Result<S
 
         if !cache_file_is_usable(&partial_file) {
             let _ = fs::remove_file(&partial_file);
-            return Err("ffmpeg prepared an empty TS playback file.".into());
+            return Err("ffmpeg prepared an empty video playback file.".into());
         }
 
         fs::rename(&partial_file, &cache_file)
@@ -1459,6 +1515,7 @@ pub fn run() {
     let initial_video = find_first_video_arg(std::env::args().skip(1));
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_libmpv::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {

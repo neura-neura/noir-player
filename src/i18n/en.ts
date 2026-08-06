@@ -19,6 +19,9 @@ export const en: AppMessages = {
     transportStreamNeedsPath: (fileName) =>
       `${fileName} needs the desktop file picker or Open with so it can be streamed by path.`,
     hlsPlaybackFailed: 'The TS stream could not be played.',
+    nativeMpvUnavailable:
+      'Native mpv playback is unavailable. Preparing a compatibility fallback.',
+    audioTrackUnavailable: 'That audio track could not be selected.',
     diskReadFailed: (fileName) => `I could not open ${fileName} from disk.`,
     inspectorOpened: (selector) =>
       `DevTools opened. Inspect \`${selector}\` to refine the default subtitle style.`,

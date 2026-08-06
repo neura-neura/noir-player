@@ -4,9 +4,7 @@
     'Segoe UI', sans-serif;
   line-height: 1.5;
   font-weight: 400;
-  background:
-    radial-gradient(circle at top, rgba(58, 167, 255, 0.14), transparent 34%),
-    linear-gradient(160deg, #050608 0%, #0d1017 55%, #050608 100%);
+  background: transparent;
   color: #f7f9fc;
 }
 
@@ -19,6 +17,7 @@ body,
 #root {
   min-height: 100%;
   margin: 0;
+  background: transparent;
 }
 
 body {
@@ -45,6 +44,37 @@ code {
   display: none;
 }
 
+.app-splash {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: #050608;
+  color: #f7f9fc;
+}
+
+.app-splash-card {
+  display: grid;
+  justify-items: center;
+  gap: 14px;
+  color: rgba(238, 244, 252, 0.78);
+  font-size: 0.9rem;
+}
+
+.app-splash-spinner {
+  width: 34px;
+  height: 34px;
+  border: 3px solid rgba(255, 255, 255, 0.16);
+  border-top-color: #39a7ff;
+  border-radius: 50%;
+  animation: noir-splash-spin 800ms linear infinite;
+}
+
+@keyframes noir-splash-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .app-shell {
   min-height: 100vh;
   padding: 24px;
@@ -52,6 +82,53 @@ code {
   grid-template-rows: auto 1fr;
   gap: 18px;
   overflow-x: clip;
+  background:
+    radial-gradient(circle at top, rgba(58, 167, 255, 0.14), transparent 34%),
+    linear-gradient(160deg, #050608 0%, #0d1017 55%, #050608 100%);
+}
+
+.app-shell-native {
+  background: transparent;
+}
+
+.app-shell-native-fullscreen {
+  min-height: 100vh;
+  padding: 0;
+  display: block;
+  overflow: hidden;
+  background: transparent;
+}
+
+.app-shell-native-fullscreen .app-header,
+.app-shell-native-fullscreen .stage-header,
+.app-shell-native-fullscreen .app-footer {
+  display: none;
+}
+
+.app-shell-native-fullscreen .app-main,
+.app-shell-native-fullscreen .player-layout,
+.app-shell-native-fullscreen .player-card {
+  min-height: 100vh;
+}
+
+.app-shell-native-fullscreen .player-layout {
+  display: block;
+}
+
+.app-shell-native-fullscreen .player-card {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.app-shell-native-fullscreen .player-frame {
+  width: 100%;
+  height: 100vh;
+  max-height: none;
+  aspect-ratio: auto;
+  border-radius: 0;
 }
 
 .page-drop-active::after {
@@ -321,6 +398,12 @@ code {
   place-items: center;
 }
 
+.player-card-native {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+
 .player-frame {
   position: relative;
   width: 100%;
@@ -332,6 +415,147 @@ code {
     linear-gradient(145deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02)),
     #000;
   isolation: isolate;
+  cursor: pointer;
+}
+
+.player-frame-native {
+  background: transparent;
+}
+
+.native-control-bar {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  z-index: 24;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 16px;
+  background: rgba(6, 10, 16, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(12px);
+  opacity: 0;
+  transform: translateY(10px);
+  pointer-events: none;
+  transition:
+    opacity 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: opacity, transform;
+}
+
+.player-frame.playback-controls-visible .native-control-bar,
+.native-control-bar:focus-within {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.playback-activity-surface {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  background: transparent;
+  pointer-events: auto;
+}
+
+.playback-feedback {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 26;
+  width: 76px;
+  height: 76px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 50%;
+  background: rgba(6, 10, 16, 0.76);
+  color: #f7fbff;
+  box-shadow:
+    0 14px 34px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  animation: playback-feedback-in 720ms cubic-bezier(0.23, 1, 0.32, 1) both;
+}
+
+@keyframes playback-feedback-in {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.82);
+  }
+
+  22% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+
+  72% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.96);
+  }
+}
+
+.native-control-button {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #f7fbff;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  transition:
+    transform 140ms ease-out,
+    border-color 140ms ease-out,
+    background-color 140ms ease-out;
+}
+
+.native-control-button:hover {
+  border-color: rgba(58, 167, 255, 0.55);
+  background: rgba(58, 167, 255, 0.16);
+}
+
+.native-control-button:active {
+  transform: scale(0.96);
+}
+
+.native-control-button svg {
+  display: block;
+}
+
+.native-progress,
+.native-volume {
+  min-width: 0;
+  accent-color: #39a7ff;
+}
+
+.native-progress {
+  flex: 1 1 auto;
+}
+
+.native-volume {
+  flex: 0 1 110px;
+}
+
+.native-time-readout {
+  flex: 0 0 auto;
+  min-width: 92px;
+  color: rgba(238, 244, 252, 0.82);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
 }
 
 .hidden-audio {
@@ -394,10 +618,10 @@ code {
   transform: translateX(calc(100% + 18px));
   opacity: 0;
   pointer-events: none;
+  will-change: transform, opacity;
 }
 
-.dock-shell-visible .floating-dock,
-.dock-shell:hover .floating-dock {
+.dock-shell-visible .floating-dock {
   transform: translateX(0);
   opacity: 1;
   pointer-events: auto;
@@ -1091,6 +1315,20 @@ input[type='color'] {
 .player-frame:fullscreen .control-panel,
 .player-frame:-webkit-full-screen .control-panel {
   z-index: 40;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-splash-spinner {
+    animation: none;
+  }
+
+  .native-control-bar,
+  .floating-dock,
+  .native-control-button,
+  .playback-feedback {
+    transition: none;
+    animation: none;
+  }
 }
 
 @media (max-width: 960px) {
