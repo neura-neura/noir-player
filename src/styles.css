@@ -131,6 +131,12 @@ code {
   border-radius: 0;
 }
 
+.app-shell-native-background {
+  background:
+    radial-gradient(circle at top, rgba(58, 167, 255, 0.14), transparent 34%),
+    linear-gradient(160deg, #050608 0%, #0d1017 55%, #050608 100%);
+}
+
 .page-drop-active::after {
   content: attr(data-drop-message);
   position: fixed;

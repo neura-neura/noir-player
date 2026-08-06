@@ -983,6 +983,13 @@ export default function App() {
       ? subtitleTrack.cues[activeCueIndex]
       : null;
   const isNativeMpvSource = videoSource?.kind === 'mpv';
+  const nativeVideoSurfaceReady =
+    isDesktopApp() &&
+    isNativeMpvSource &&
+    mpvStatus === 'ready' &&
+    mpvFileLoadedTick > 0;
+  const shouldKeepNativeBackground =
+    isDesktopApp() && !nativeVideoSurfaceReady;
   const currentPlaybackTime = isNativeMpvSource
     ? mpvTimePos
     : videoElementRef.current?.currentTime || 0;
@@ -4039,6 +4046,8 @@ export default function App() {
   return (
     <div
       className={`app-shell ${isDesktopApp() ? 'app-shell-native' : ''} ${
+        shouldKeepNativeBackground ? 'app-shell-native-background' : ''
+      } ${
         nativeFullscreen ? 'app-shell-native-fullscreen' : ''
       } ${pageDropActive ? 'page-drop-active' : ''}`}
       data-drop-message={dropOverlayMessage}

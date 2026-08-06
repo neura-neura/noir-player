@@ -1,6 +1,6 @@
 {
   "name": "noir-player",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "private": true,
   "description": "Windows desktop video player built with Tauri, React, native libmpv playback, and FFmpeg-assisted fallback.",
   "type": "module",
