@@ -187,6 +187,7 @@ const SYNC_STORAGE_KEY = 'noir-web-player:subtitle-sync';
 const REMEMBER_SYNC_STORAGE_KEY = 'noir-web-player:remember-sync';
 const PROMPT_SUBTITLES_STORAGE_KEY = 'noir-web-player:prompt-subtitles';
 const AUTOPLAY_ON_OPEN_STORAGE_KEY = 'noir-web-player:autoplay-on-open';
+const VOLUME_STORAGE_KEY = 'noir-web-player:volume';
 const OPEN_PANEL_ON_OPEN_STORAGE_KEY = 'noir-web-player:open-panel-on-open';
 const FULLSCREEN_ON_OPEN_STORAGE_KEY = 'noir-web-player:fullscreen-on-open';
 const END_PLAYBACK_ACTION_STORAGE_KEY = 'noir-web-player:end-playback-action';
@@ -418,6 +419,31 @@ function readStoredBoolean(storageKey: string, fallbackValue: boolean): boolean 
     return storedValue === 'true';
   } catch {
     return fallbackValue;
+  }
+}
+
+function readStoredVolume(): number {
+  try {
+    const storedValue = window.localStorage.getItem(VOLUME_STORAGE_KEY);
+    if (storedValue === null) {
+      return 1;
+    }
+
+    const parsedValue = Number(storedValue);
+    return Number.isFinite(parsedValue) ? clamp(parsedValue, 0, 1) : 1;
+  } catch {
+    return 1;
+  }
+}
+
+function storeVolume(value: number) {
+  try {
+    window.localStorage.setItem(
+      VOLUME_STORAGE_KEY,
+      String(clamp(value, 0, 1)),
+    );
+  } catch {
+    // Keep playback working if storage is unavailable.
   }
 }
 
@@ -914,7 +940,7 @@ export default function App() {
   const [mpvPaused, setMpvPaused] = useState(true);
   const [mpvTimePos, setMpvTimePos] = useState(0);
   const [mpvDuration, setMpvDuration] = useState(0);
-  const [mpvVolume, setMpvVolume] = useState(1);
+  const [mpvVolume, setMpvVolume] = useState(readStoredVolume);
   const [mpvMuted, setMpvMuted] = useState(false);
   const [mpvPlaybackRate, setMpvPlaybackRate] = useState(1);
   const [mpvFilename, setMpvFilename] = useState<string | null>(null);
@@ -923,6 +949,9 @@ export default function App() {
   const [mpvFileLoadedTick, setMpvFileLoadedTick] = useState(0);
   const [mpvEndFileTick, setMpvEndFileTick] = useState(0);
   const [nativeFullscreen, setNativeFullscreen] = useState(false);
+  const [fullscreenTransitionPhase, setFullscreenTransitionPhase] = useState<
+    'idle' | 'covering' | 'fading'
+  >('idle');
 
   const videoInputRef = useRef<HTMLInputElement>(null);
   const subtitleInputRef = useRef<HTMLInputElement>(null);
@@ -947,6 +976,7 @@ export default function App() {
     duration: 0,
     playbackRate: 1,
   });
+  const mpvVolumeReadyRef = useRef(false);
   const handledMpvFileLoadedTickRef = useRef(0);
   const mpvFallbackPathRef = useRef<string | null>(null);
   const syncplayPendingStateRef = useRef<{
@@ -970,8 +1000,11 @@ export default function App() {
   const subtitleDropDepthRef = useRef(0);
   const playbackControlsHideTimerRef = useRef<number | null>(null);
   const playbackFeedbackHideTimerRef = useRef<number | null>(null);
+  const fullscreenTransitionTimerRef = useRef<number | null>(null);
   const nativeVideoRefreshTimersRef = useRef<number[]>([]);
-  const nativeVideoMarginUpdateRef = useRef<(() => void) | null>(null);
+  const nativeVideoTransitionHiddenRef = useRef(false);
+  const nativeVideoMarginQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const nativeVideoMarginUpdateRef = useRef<(() => Promise<void>) | null>(null);
   const messages = MESSAGES[language];
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
@@ -988,6 +1021,8 @@ export default function App() {
     isNativeMpvSource &&
     mpvStatus === 'ready' &&
     mpvFileLoadedTick > 0;
+  const nativeVideoLoading =
+    isNativeMpvSource && !nativeVideoSurfaceReady && mpvStatus !== 'failed';
   const shouldKeepNativeBackground =
     isDesktopApp() && !nativeVideoSurfaceReady;
   const currentPlaybackTime = isNativeMpvSource
@@ -1004,6 +1039,15 @@ export default function App() {
   const currentPlaybackRate = isNativeMpvSource
     ? mpvPlaybackRate
     : videoElementRef.current?.playbackRate || 1;
+  const nativeProgressPercent =
+    mpvDuration > 0 ? clamp((mpvTimePos / mpvDuration) * 100, 0, 100) : 0;
+  const nativeVolumePercent = clamp(mpvVolume * 100, 0, 100);
+  const nativeProgressRangeStyle = {
+    '--range-progress': `${nativeProgressPercent}%`,
+  } as CSSProperties;
+  const nativeVolumeRangeStyle = {
+    '--range-progress': `${nativeVolumePercent}%`,
+  } as CSSProperties;
 
   const remoteFontOptions = remoteFontFamilies.map((fontName) => ({
     label: `${fontName} (CSS)`,
@@ -1112,7 +1156,9 @@ export default function App() {
         .then((isFullscreen) => {
           if (active) {
             setNativeFullscreen(isFullscreen);
-            requestNativeVideoRedraw();
+            if (!nativeVideoTransitionHiddenRef.current) {
+              requestNativeVideoRedraw();
+            }
           }
         })
         .catch(() => {
@@ -1172,8 +1218,40 @@ export default function App() {
     nativeVideoRefreshTimersRef.current = [];
   }
 
-  function requestNativeVideoRedraw() {
+  function enqueueNativeVideoMarginUpdate(
+    update: () => Promise<void>,
+  ): Promise<void> {
+    const queuedUpdate = nativeVideoMarginQueueRef.current
+      .catch(() => undefined)
+      .then(update);
+    nativeVideoMarginQueueRef.current = queuedUpdate.catch(() => undefined);
+    return queuedUpdate;
+  }
+
+  async function setNativeVideoTransitionHidden(hidden: boolean) {
     if (!isNativeMpvSource) {
+      return;
+    }
+
+    nativeVideoTransitionHiddenRef.current = hidden;
+
+    if (hidden) {
+      await enqueueNativeVideoMarginUpdate(() =>
+        setVideoMarginRatio({
+          left: 0.5,
+          right: 0.5,
+          top: 0.5,
+          bottom: 0.5,
+        }),
+      );
+      return;
+    }
+
+    await nativeVideoMarginUpdateRef.current?.();
+  }
+
+  function requestNativeVideoRedraw() {
+    if (!isNativeMpvSource || nativeVideoTransitionHiddenRef.current) {
       return;
     }
 
@@ -1203,6 +1281,11 @@ export default function App() {
     options?: VideoOpenOptions,
   ) {
     const nextPanelVisible = options?.panelVisible ?? shouldOpenPanelOnVideoReady;
+    const shouldApplyOpenPreferences = options?.applyOpenPreferences ?? true;
+    const storedAutoplayOnOpen = readStoredBoolean(
+      AUTOPLAY_ON_OPEN_STORAGE_KEY,
+      autoplayOnOpen,
+    );
     clearPlaybackControlsHideTimer();
     setPlaybackControlsVisible(true);
     schedulePlaybackControlsHide();
@@ -1241,8 +1324,10 @@ export default function App() {
           panelVisible: nextPanelVisible,
         }
       : null;
-    playOnReadyRef.current = Boolean(options?.playOnReady);
-    applyOpenPreferencesRef.current = options?.applyOpenPreferences ?? true;
+    playOnReadyRef.current =
+      options?.playOnReady ??
+      (shouldApplyOpenPreferences ? storedAutoplayOnOpen : false);
+    applyOpenPreferencesRef.current = shouldApplyOpenPreferences;
     preservedPlaybackStateRef.current = options?.preservePlaybackState ?? null;
     setSubtitleDropActive(false);
     if (!rememberSyncOffset) {
@@ -1266,7 +1351,7 @@ export default function App() {
             kind: 'mpv',
             path,
           },
-          messages.notices.videoDetected(fileName),
+          messages.notices.videoPreparing(fileName),
           options,
         );
         return;
@@ -1312,11 +1397,6 @@ export default function App() {
   useEffect(() => {
     if (!isDesktopApp()) {
       setMpvStatus('disabled');
-      return;
-    }
-
-    if (videoSource?.kind !== 'mpv' || !videoSource.path) {
-      setMpvStatus('loading');
       return;
     }
 
@@ -1368,11 +1448,16 @@ export default function App() {
                 );
                 break;
               case 'volume':
-                setMpvVolume(
-                  typeof event.data === 'number' && Number.isFinite(event.data)
-                    ? clamp(event.data / 100, 0, 1)
-                    : 1,
-                );
+                {
+                  const nextVolume =
+                    typeof event.data === 'number' && Number.isFinite(event.data)
+                      ? clamp(event.data / 100, 0, 1)
+                      : 1;
+                  setMpvVolume(nextVolume);
+                  if (mpvVolumeReadyRef.current) {
+                    storeVolume(nextVolume);
+                  }
+                }
                 break;
               case 'mute':
                 setMpvMuted(Boolean(event.data));
@@ -1418,6 +1503,11 @@ export default function App() {
           observedProperties: MPV_OBSERVED_PROPERTIES,
         });
 
+        await setMpvProperty('volume', readStoredVolume() * 100).catch(() => {
+          // Keep the default volume if mpv rejects the initial preference.
+        });
+        mpvVolumeReadyRef.current = true;
+
         if (active) {
           setMpvStatus('ready');
         }
@@ -1439,7 +1529,7 @@ export default function App() {
         // Ignore shutdown errors while closing the desktop app.
       });
     };
-  }, [videoSource?.kind]);
+  }, []);
 
   function applyPendingSyncplayState(
     videoElement: HTMLVideoElement,
@@ -1544,43 +1634,8 @@ export default function App() {
       try {
         const mpvSource = toMpvFileUrl(sourcePath);
         await mpvCommand('loadfile', [mpvSource, 'replace']);
-
-        for (let attempt = 0; attempt < 100 && active; attempt += 1) {
-          await new Promise((resolve) => window.setTimeout(resolve, 100));
-          let filename: string | null = null;
-          try {
-            filename = await getMpvProperty('filename', 'string');
-          } catch {
-            continue;
-          }
-          if (typeof filename !== 'string' || !filename) {
-            continue;
-          }
-
-          setMpvFilename(filename);
-          const [duration, width, height] = await Promise.all([
-            getMpvProperty('duration', 'double').catch(() => null),
-            getMpvProperty('video-params/w', 'int64').catch(() => null),
-            getMpvProperty('video-params/h', 'int64').catch(() => null),
-          ]);
-          if (typeof duration === 'number' && Number.isFinite(duration)) {
-            setMpvDuration(Math.max(0, duration));
-          }
-          if (typeof width === 'number' && Number.isFinite(width)) {
-            setMpvVideoWidth(Math.max(0, width));
-          }
-          if (typeof height === 'number' && Number.isFinite(height)) {
-            setMpvVideoHeight(Math.max(0, height));
-          }
-          setMpvFileLoadedTick((currentValue) =>
-            currentValue > 0 ? currentValue : 1,
-          );
-          return;
-        }
-
-        if (active) {
-          setNotice(messagesRef.current.notices.diskReadFailed(videoSource.fileName));
-        }
+        // mpv emits `file-loaded` when demuxing has completed. The event and
+        // property observers update metadata without polling the native bridge.
       } catch (error) {
         console.error('[Noir mpv] failed to load file', error);
         if (active) {
@@ -1670,14 +1725,6 @@ export default function App() {
       return;
     }
 
-    if (
-      mpvFilename &&
-      !areFilePathsEqual(mpvFilename, videoSource.path) &&
-      !areFilePathsEqual(decodeMpvFilePath(mpvFilename), videoSource.path)
-    ) {
-      return;
-    }
-
     handledMpvFileLoadedTickRef.current = mpvFileLoadedTick;
     requestNativeVideoRedraw();
 
@@ -1712,23 +1759,31 @@ export default function App() {
       );
       const shouldPlayOnReady = syncplayPlaybackApplied
         ? pendingSyncplayPaused === false ||
-          (pendingSyncplayPaused === null && !mpvPlaybackStateRef.current.paused)
-        : shouldForcePlayOnReady ||
-          (shouldApplyOpenPreferences && autoplayOnOpen);
+          (pendingSyncplayPaused === null &&
+            (shouldForcePlayOnReady ||
+              (shouldApplyOpenPreferences && autoplayOnOpen)))
+        : pendingSyncplayPaused !== null
+          ? pendingSyncplayPaused === false
+          : shouldForcePlayOnReady ||
+            (shouldApplyOpenPreferences && autoplayOnOpen);
 
       await setMpvProperty('pause', !shouldPlayOnReady);
+      if (shouldPlayOnReady) {
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+        await setMpvProperty('pause', false);
+      }
       refreshEmbeddedSubtitleTracks();
       void refreshMediaSubtitleTracks(videoSource.path);
       void refreshAudioTracks(videoSource.path);
       updateSubtitleCue();
 
-      setNotice(
+      const playbackNotice =
         shouldApplyOpenPreferences && promptForSubtitles && !shouldForcePlayOnReady
           ? messagesRef.current.notices.videoReadyPrompt(videoSource.fileName)
           : shouldPlayOnReady
             ? messagesRef.current.notices.videoReadyPlaying(videoSource.fileName)
-            : messagesRef.current.notices.videoReadyPaused(videoSource.fileName),
-      );
+            : messagesRef.current.notices.videoReadyPaused(videoSource.fileName);
+      setNotice(playbackNotice);
 
       if (shouldApplyOpenPreferences && fullscreenOnOpen) {
         await applyNativeFullscreen(true);
@@ -1740,7 +1795,6 @@ export default function App() {
     autoplayOnOpen,
     fullscreenOnOpen,
     mpvFileLoadedTick,
-    mpvFilename,
     mpvStatus,
     promptForSubtitles,
     shouldOpenPanelOnVideoReady,
@@ -1817,18 +1871,28 @@ export default function App() {
     }
 
     const updateVideoMargin = () => {
-      const rect = playerFrameRef.current?.getBoundingClientRect();
-      if (!rect || window.innerWidth <= 0 || window.innerHeight <= 0) {
-        return;
+      if (nativeVideoTransitionHiddenRef.current) {
+        return Promise.resolve();
       }
 
-      void setVideoMarginRatio({
-        left: clamp(rect.left / window.innerWidth, 0, 1),
-        right: clamp(1 - rect.right / window.innerWidth, 0, 1),
-        top: clamp(rect.top / window.innerHeight, 0, 1),
-        bottom: clamp(1 - rect.bottom / window.innerHeight, 0, 1),
-      }).catch(() => {
-        // Ignore margin updates while the native mpv window is changing size.
+      const rect = playerFrameRef.current?.getBoundingClientRect();
+      if (!rect || window.innerWidth <= 0 || window.innerHeight <= 0) {
+        return Promise.resolve();
+      }
+
+      return enqueueNativeVideoMarginUpdate(async () => {
+        if (nativeVideoTransitionHiddenRef.current) {
+          return;
+        }
+
+        await setVideoMarginRatio({
+          left: clamp(rect.left / window.innerWidth, 0, 1),
+          right: clamp(1 - rect.right / window.innerWidth, 0, 1),
+          top: clamp(rect.top / window.innerHeight, 0, 1),
+          bottom: clamp(1 - rect.bottom / window.innerHeight, 0, 1),
+        }).catch(() => {
+          // Ignore margin updates while the native mpv window is changing size.
+        });
       });
     };
     nativeVideoMarginUpdateRef.current = updateVideoMargin;
@@ -1871,7 +1935,13 @@ export default function App() {
   function openVideoFromFile(file: File) {
     const nativePath = (file as File & { path?: string }).path;
     if (nativePath && isVideoFileName(file.name)) {
-      void openVideoFromPath(nativePath);
+      void openVideoFromPath(nativePath, {
+        playOnReady: readStoredBoolean(
+          AUTOPLAY_ON_OPEN_STORAGE_KEY,
+          autoplayOnOpen,
+        ),
+        applyOpenPreferences: true,
+      });
       return;
     }
 
@@ -2097,6 +2167,32 @@ export default function App() {
     showPlaybackFeedback('pause');
   }
 
+  function seekPlaybackBy(seconds: number) {
+    if (!videoSource) {
+      return;
+    }
+
+    if (isNativeMpvSource) {
+      void mpvCommand('seek', [seconds, 'relative', 'exact']).catch(() => {
+        // Keep keyboard controls available if mpv is changing state.
+      });
+      return;
+    }
+
+    const videoElement = videoElementRef.current;
+    if (!videoElement) {
+      return;
+    }
+
+    const currentTime = Number.isFinite(videoElement.currentTime)
+      ? videoElement.currentTime
+      : 0;
+    const duration = Number.isFinite(videoElement.duration)
+      ? Math.max(0, videoElement.duration)
+      : Number.POSITIVE_INFINITY;
+    videoElement.currentTime = clamp(currentTime + seconds, 0, duration);
+  }
+
   function isPlayerInteractiveTarget(target: EventTarget | null): boolean {
     return (
       target instanceof HTMLElement &&
@@ -2120,8 +2216,70 @@ export default function App() {
     void togglePlayerFullscreen();
   }
 
+  function handleNativeControlBarClick(event: MouseEvent<HTMLDivElement>) {
+    event.stopPropagation();
+  }
+
+  function handleNativeControlBarDoubleClick(
+    event: MouseEvent<HTMLDivElement>,
+  ) {
+    event.stopPropagation();
+  }
+
   async function applyNativeFullscreen(nextFullscreen: boolean) {
+    if (fullscreenTransitionTimerRef.current !== null) {
+      window.clearTimeout(fullscreenTransitionTimerRef.current);
+      fullscreenTransitionTimerRef.current = null;
+    }
+
+    const waitForFrames = (count: number) =>
+      new Promise<void>((resolve) => {
+        let remaining = Math.max(1, count);
+        const waitForNextFrame = () => {
+          window.requestAnimationFrame(() => {
+            remaining -= 1;
+            if (remaining <= 0) {
+              resolve();
+              return;
+            }
+            waitForNextFrame();
+          });
+        };
+        waitForNextFrame();
+      });
+
+    const waitForWindowLayoutToSettle = async () => {
+      let previousSize = `${window.innerWidth}x${window.innerHeight}`;
+      let stableFrames = 0;
+
+      for (let attempt = 0; attempt < 14 && stableFrames < 2; attempt += 1) {
+        await waitForFrames(1);
+        const nextSize = `${window.innerWidth}x${window.innerHeight}`;
+        if (nextSize === previousSize) {
+          stableFrames += 1;
+        } else {
+          previousSize = nextSize;
+          stableFrames = 0;
+        }
+      }
+
+      await waitForFrames(2);
+    };
+
+    setFullscreenTransitionPhase('covering');
+    const usesNativeVideo = isNativeMpvSource;
+    let transitionSucceeded = false;
+
     try {
+      if (usesNativeVideo) {
+        // mpv is a native child surface and can resize before the WebView gets
+        // its new layout. Box it to zero while the window changes so the user
+        // never sees the old and new surfaces at the same time.
+        await setNativeVideoTransitionHidden(true);
+      }
+
+      await waitForFrames(2);
+
       const currentWindow = getCurrentWindow();
       await currentWindow.setFullscreen(nextFullscreen);
       const confirmedFullscreen = await currentWindow
@@ -2130,14 +2288,26 @@ export default function App() {
       setNativeFullscreen(confirmedFullscreen);
       revealPlaybackControls();
 
-      await new Promise<void>((resolve) => {
-        window.requestAnimationFrame(() => {
-          window.requestAnimationFrame(resolve);
-        });
-      });
-      requestNativeVideoRedraw();
+      await waitForWindowLayoutToSettle();
+      transitionSucceeded = true;
     } catch (error) {
       console.error('[Noir window] fullscreen transition failed', error);
+    } finally {
+      if (usesNativeVideo) {
+        await setNativeVideoTransitionHidden(false).catch(() => undefined);
+      }
+
+      await waitForFrames(2);
+      if (transitionSucceeded) {
+        requestNativeVideoRedraw();
+        await waitForFrames(2);
+      }
+
+      setFullscreenTransitionPhase('fading');
+      fullscreenTransitionTimerRef.current = window.setTimeout(() => {
+        setFullscreenTransitionPhase('idle');
+        fullscreenTransitionTimerRef.current = null;
+      }, 360);
     }
   }
 
@@ -2200,6 +2370,9 @@ export default function App() {
       } else if (event.key === 'Escape' && nativeFullscreen) {
         event.preventDefault();
         void exitPlayerFullscreen();
+      } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        event.preventDefault();
+        seekPlaybackBy(event.key === 'ArrowLeft' ? -5 : 5);
       } else if (event.key.toLowerCase() === 'f') {
         event.preventDefault();
         void togglePlayerFullscreen();
@@ -3342,7 +3515,7 @@ export default function App() {
     }
 
     refreshEmbeddedSubtitleTracks();
-    if (videoSource.path) {
+    if (videoSource.path && videoSource.kind !== 'mpv') {
       void refreshMediaSubtitleTracks(videoSource.path);
       if (videoSource.kind !== 'hls') {
         void refreshAudioTracks(videoSource.path);
@@ -3482,7 +3655,12 @@ export default function App() {
       active = false;
       void unlistenPromise?.then((unlisten) => unlisten());
     };
-  }, [messages, rememberSyncOffset, shouldOpenPanelOnVideoReady]);
+  }, [
+    autoplayOnOpen,
+    messages,
+    rememberSyncOffset,
+    shouldOpenPanelOnVideoReady,
+  ]);
 
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
@@ -3915,6 +4093,10 @@ export default function App() {
       });
     };
 
+    const handleVolumeChange = () => {
+      storeVolume(videoElement.volume);
+    };
+
     const handleLoadedMetadata = () => {
       const preservedPlaybackState = preservedPlaybackStateRef.current;
       if (preservedPlaybackState) {
@@ -3922,6 +4104,8 @@ export default function App() {
         videoElement.muted = preservedPlaybackState.muted;
         videoElement.playbackRate = preservedPlaybackState.playbackRate;
         preservedPlaybackStateRef.current = null;
+      } else {
+        videoElement.volume = readStoredVolume();
       }
 
       if (videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
@@ -4001,6 +4185,7 @@ export default function App() {
     videoElement.addEventListener('seeked', updateSubtitleCue);
     videoElement.addEventListener('timeupdate', updateSubtitleCue);
     videoElement.addEventListener('ended', handleEnded);
+    videoElement.addEventListener('volumechange', handleVolumeChange);
 
     updateSubtitleCue();
     if (!videoElement.paused) {
@@ -4016,6 +4201,7 @@ export default function App() {
       videoElement.removeEventListener('seeked', updateSubtitleCue);
       videoElement.removeEventListener('timeupdate', updateSubtitleCue);
       videoElement.removeEventListener('ended', handleEnded);
+      videoElement.removeEventListener('volumechange', handleVolumeChange);
     };
   }, [
     autoplayOnOpen,
@@ -4298,6 +4484,10 @@ export default function App() {
                   playbackControlsVisible
                     ? 'playback-controls-visible'
                     : 'playback-controls-hidden'
+                } ${
+                  fullscreenTransitionPhase !== 'idle'
+                    ? `fullscreen-transition-${fullscreenTransitionPhase}`
+                    : ''
                 }`}
                 style={playerFrameStyle}
                 onClick={handlePlayerClick}
@@ -4328,6 +4518,13 @@ export default function App() {
                   />
                 ) : null}
 
+                {nativeVideoLoading ? (
+                  <div className='native-video-loading' role='status' aria-live='polite'>
+                    <span className='native-video-loading-spinner' aria-hidden='true' />
+                    <span>{messages.notices.videoPreparing(videoSource.fileName)}</span>
+                  </div>
+                ) : null}
+
                 {playbackFeedback ? (
                   <div
                     className={`playback-feedback playback-feedback-${playbackFeedback}`}
@@ -4345,8 +4542,8 @@ export default function App() {
                   <div
                     className='native-control-bar'
                     data-player-control
-                    onClick={(event) => event.stopPropagation()}
-                    onDoubleClick={(event) => event.stopPropagation()}
+                    onClick={handleNativeControlBarClick}
+                    onDoubleClick={handleNativeControlBarDoubleClick}
                     onPointerDown={(event) => event.stopPropagation()}
                   >
                     <button
@@ -4367,6 +4564,7 @@ export default function App() {
                     </button>
                     <input
                       className='native-progress'
+                      style={nativeProgressRangeStyle}
                       data-player-control
                       type='range'
                       min={0}
@@ -4404,6 +4602,7 @@ export default function App() {
                     </button>
                     <input
                       className='native-volume'
+                      style={nativeVolumeRangeStyle}
                       data-player-control
                       type='range'
                       min={0}
@@ -4411,11 +4610,13 @@ export default function App() {
                       step={0.01}
                       value={mpvVolume}
                       aria-label='Volume'
-                      onChange={(event) =>
-                        void setMpvProperty('volume', Number(event.target.value) * 100).catch(
+                      onChange={(event) => {
+                        const nextVolume = Number(event.target.value);
+                        storeVolume(nextVolume);
+                        void setMpvProperty('volume', nextVolume * 100).catch(
                           () => undefined,
-                        )
-                      }
+                        );
+                      }}
                     />
                     <button
                       type='button'
@@ -5644,6 +5845,13 @@ export default function App() {
         <div className='toast-notice' role='status' aria-live='polite'>
           {toast.message}
         </div>
+      ) : null}
+
+      {fullscreenTransitionPhase !== 'idle' && isDesktopApp() ? (
+        <div
+          className={`fullscreen-transition-layer fullscreen-transition-layer-${fullscreenTransitionPhase}`}
+          aria-hidden='true'
+        />
       ) : null}
     </div>
   );

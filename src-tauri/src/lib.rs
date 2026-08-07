@@ -1077,66 +1077,64 @@ fn list_embedded_subtitle_streams(
         return Ok(vec![]);
     }
 
-    let mut subtitle_streams: Vec<EmbeddedSubtitleStream> = probe_streams(&app, &path)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|stream| {
-            stream.codec_type.as_deref() == Some("subtitle")
-                || stream
-                    .codec_name
-                    .as_deref()
-                    .map(is_known_subtitle_codec)
-                    .unwrap_or(false)
-        })
-        .enumerate()
-        .map(|(position, stream)| {
-            let language = stream
-                .tags
-                .as_ref()
-                .and_then(|tags| tags.language.as_deref())
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let title = stream
-                .tags
-                .as_ref()
-                .and_then(|tags| tags.title.as_deref())
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let codec = stream.codec_name.unwrap_or_default().trim().to_string();
+    let subtitle_streams: Vec<EmbeddedSubtitleStream> = match probe_streams(&app, &path) {
+        Ok(streams) => streams
+            .into_iter()
+            .filter(|stream| {
+                stream.codec_type.as_deref() == Some("subtitle")
+                    || stream
+                        .codec_name
+                        .as_deref()
+                        .map(is_known_subtitle_codec)
+                        .unwrap_or(false)
+            })
+            .enumerate()
+            .map(|(position, stream)| {
+                let language = stream
+                    .tags
+                    .as_ref()
+                    .and_then(|tags| tags.language.as_deref())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let title = stream
+                    .tags
+                    .as_ref()
+                    .and_then(|tags| tags.title.as_deref())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let codec = stream.codec_name.unwrap_or_default().trim().to_string();
 
-            let _legacy_label = if !title.is_empty() {
-                title.clone()
-            } else if !language.is_empty() {
-                language.to_uppercase()
-            } else {
-                format!("Embedded {}", position + 1)
-            };
+                let _legacy_label = if !title.is_empty() {
+                    title.clone()
+                } else if !language.is_empty() {
+                    language.to_uppercase()
+                } else {
+                    format!("Embedded {}", position + 1)
+                };
 
-            let mut _legacy_detail_parts = Vec::new();
-            if !language.is_empty() {
-                _legacy_detail_parts.push(language.to_uppercase());
-            }
-            if !codec.is_empty() {
-                _legacy_detail_parts.push(codec.to_uppercase());
-            }
+                let mut _legacy_detail_parts = Vec::new();
+                if !language.is_empty() {
+                    _legacy_detail_parts.push(language.to_uppercase());
+                }
+                if !codec.is_empty() {
+                    _legacy_detail_parts.push(codec.to_uppercase());
+                }
 
-            let label = format_stream_label(&title, &language, "Embedded", position);
-            let detail = format_stream_detail(&language, &codec);
-            let detail_parts = vec![detail];
+                let label = format_stream_label(&title, &language, "Embedded", position);
+                let detail = format_stream_detail(&language, &codec);
+                let detail_parts = vec![detail];
 
-            EmbeddedSubtitleStream {
-                index: stream.index,
-                label,
-                detail: detail_parts.join(" • "),
-            }
-        })
-        .collect();
-
-    if subtitle_streams.is_empty() {
-        subtitle_streams = fallback_subtitle_streams(&app, &path);
-    }
+                EmbeddedSubtitleStream {
+                    index: stream.index,
+                    label,
+                    detail: detail_parts.join(" • "),
+                }
+            })
+            .collect(),
+        Err(_) => fallback_subtitle_streams(&app, &path),
+    };
 
     Ok(subtitle_streams)
 }

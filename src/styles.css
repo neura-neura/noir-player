@@ -167,6 +167,13 @@ code {
   backdrop-filter: blur(18px);
 }
 
+.app-header,
+.stage-header,
+.app-footer {
+  position: relative;
+  z-index: 2;
+}
+
 .app-header {
   padding: 18px 20px;
   display: flex;
@@ -408,6 +415,7 @@ code {
   background: transparent;
   border-color: transparent;
   box-shadow: none;
+  overflow: visible;
 }
 
 .player-frame {
@@ -426,30 +434,87 @@ code {
 
 .player-frame-native {
   background: transparent;
+  box-shadow: 0 0 0 100vmax #0d1017;
+}
+
+.app-shell-native-fullscreen .player-frame-native {
+  box-shadow: none;
+}
+
+.fullscreen-transition-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(57, 167, 255, 0.12), transparent 48%),
+    #0d1017;
+  opacity: 1;
+  will-change: opacity;
+}
+
+.fullscreen-transition-layer-fading {
+  opacity: 0;
+  transition: opacity 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.native-video-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 28;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 14px;
+  padding: 24px;
+  color: rgba(239, 247, 255, 0.88);
+  text-align: center;
+  background: rgba(5, 6, 8, 0.24);
+  pointer-events: none;
+}
+
+.native-video-loading-spinner {
+  width: 42px;
+  height: 42px;
+  border: 3px solid rgba(255, 255, 255, 0.18);
+  border-top-color: #6fe1ff;
+  border-right-color: #39a7ff;
+  border-radius: 50%;
+  animation: native-video-loading-spin 760ms linear infinite;
+}
+
+@keyframes native-video-loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .native-control-bar {
   position: absolute;
-  left: 16px;
-  right: 16px;
-  bottom: 16px;
+  left: 0;
+  right: 0;
+  bottom: 0;
   z-index: 24;
   min-height: 48px;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 10px;
-  border-radius: 16px;
-  background: rgba(6, 10, 16, 0.82);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.32);
+  padding: 12px 16px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(
+    180deg,
+    rgba(6, 10, 16, 0) 0%,
+    rgba(6, 10, 16, 0.78) 38%,
+    rgba(6, 10, 16, 0.96) 100%
+  );
+  box-shadow: 0 -14px 30px rgba(0, 0, 0, 0.22);
   backdrop-filter: blur(12px);
   opacity: 0;
-  transform: translateY(10px);
+  transform: translateY(100%);
   pointer-events: none;
   transition:
     opacity 220ms cubic-bezier(0.22, 1, 0.36, 1),
-    transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+    transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
   will-change: opacity, transform;
 }
 
@@ -543,16 +608,116 @@ code {
 
 .native-progress,
 .native-volume {
+  appearance: none;
   min-width: 0;
+  height: 4px;
+  margin: 0;
+  padding: 0;
   accent-color: #39a7ff;
+  background: transparent;
+  cursor: grab;
+  touch-action: none;
+}
+
+.native-progress:active,
+.native-volume:active {
+  cursor: grabbing;
+}
+
+.native-progress::-webkit-slider-runnable-track,
+.native-volume::-webkit-slider-runnable-track,
+.native-progress::-moz-range-track,
+.native-volume::-moz-range-track {
+  cursor: grab;
+}
+
+.native-progress:active::-webkit-slider-runnable-track,
+.native-volume:active::-webkit-slider-runnable-track,
+.native-progress:active::-moz-range-track,
+.native-volume:active::-moz-range-track {
+  cursor: grabbing;
+}
+
+.native-progress::-webkit-slider-runnable-track,
+.native-volume::-webkit-slider-runnable-track {
+  height: 4px;
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    #39a7ff 0 var(--range-progress, 0%),
+    rgba(255, 255, 255, 0.16) var(--range-progress, 0%) 100%
+  );
+}
+
+.native-progress::-webkit-slider-thumb,
+.native-volume::-webkit-slider-thumb {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border: 2px solid #0d1017;
+  border-radius: 50%;
+  background: #39a7ff;
+  box-shadow:
+    0 0 0 2px rgba(57, 167, 255, 0.22),
+    0 3px 8px rgba(0, 0, 0, 0.34);
+  cursor: grab;
+}
+
+.native-progress::-moz-range-track,
+.native-volume::-moz-range-track {
+  height: 4px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.native-progress::-moz-range-progress,
+.native-volume::-moz-range-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: #39a7ff;
+}
+
+.native-progress::-moz-range-thumb,
+.native-volume::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 2px solid #0d1017;
+  border-radius: 50%;
+  background: #39a7ff;
+  box-shadow:
+    0 0 0 2px rgba(57, 167, 255, 0.22),
+    0 3px 8px rgba(0, 0, 0, 0.34);
+  cursor: grab;
+}
+
+.native-progress:active::-webkit-slider-thumb,
+.native-volume:active::-webkit-slider-thumb,
+.native-progress:active::-moz-range-thumb,
+.native-volume:active::-moz-range-thumb {
+  cursor: grabbing;
+}
+
+.native-progress:focus-visible,
+.native-volume:focus-visible {
+  outline: 2px solid rgba(111, 225, 255, 0.86);
+  outline-offset: 2px;
 }
 
 .native-progress {
-  flex: 1 1 auto;
+  flex: 1 1 320px;
+  min-width: 220px;
 }
 
 .native-volume {
   flex: 0 1 110px;
+}
+
+.native-progress:disabled {
+  cursor: default;
+  opacity: 0.65;
 }
 
 .native-time-readout {
@@ -1331,7 +1496,9 @@ input[type='color'] {
   .native-control-bar,
   .floating-dock,
   .native-control-button,
-  .playback-feedback {
+  .playback-feedback,
+   .fullscreen-transition-layer,
+   .fullscreen-transition-layer-fading {
     transition: none;
     animation: none;
   }
