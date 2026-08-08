@@ -1,0 +1,19 @@
+{
+  "name": "@noir-player/plugin-playback-stats",
+  "version": "1.0.0",
+  "description": "First-party portable playback statistics plugin for Noir Player.",
+  "type": "module",
+  "private": true,
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./src/index.tsx",
+      "import": "./src/index.tsx"
+    }
+  },
+  "peerDependencies": {
+    "@noir-player/plugin-api": "1.0.0",
+    "react": ">=18.0.0 <20.0.0",
+    "react-dom": ">=18.0.0 <20.0.0"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "@noir-player/plugin-test-utils",
+  "version": "1.0.0",
+  "description": "Fakes and assertions for Noir Player plugin contract tests.",
+  "type": "module",
+  "private": true,
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "peerDependencies": {
+    "@noir-player/plugin-api": "1.0.0"
+  }
+}

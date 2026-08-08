@@ -1,0 +1,17 @@
+{
+  "name": "@noir-player/plugin-mpv-lab",
+  "version": "1.0.0",
+  "description": "Non-selected fixture for testing the Noir Player mpv capability escape hatch.",
+  "type": "module",
+  "private": true,
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "peerDependencies": {
+    "@noir-player/plugin-api": "1.0.0"
+  }
+}

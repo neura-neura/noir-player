@@ -22,6 +22,9 @@ use winreg::{
 const SUPPORTED_VIDEO_EXTENSIONS: &[&str] = &[
     "mp4", "mkv", "avi", "mov", "m4v", "webm", "ts", "m2ts", "wmv", "flv",
 ];
+const SUPPORTED_EXTERNAL_SUBTITLE_EXTENSIONS: &[&str] = &[
+    "srt", "vtt", "ass", "ssa", "sup", "pgs", "idx", "sub", "zip",
+];
 const PLAYBACK_CACHE_VERSION: &str = "browser-h264-aac-v1";
 const HLS_CACHE_VERSION: &str = "ts-hls-segments-v1";
 const HLS_SEGMENT_SECONDS: f64 = 2.0;
@@ -62,6 +65,7 @@ struct SyncplayCommand {
     rate: Option<f64>,
     path: Option<String>,
     message: Option<String>,
+    muted: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -163,6 +167,89 @@ fn is_supported_video_extension(extension: &OsStr) -> bool {
             SUPPORTED_VIDEO_EXTENSIONS.contains(&extension.as_str())
         })
         .unwrap_or(false)
+}
+
+fn is_supported_external_subtitle_extension(extension: &OsStr) -> bool {
+    extension
+        .to_str()
+        .map(|extension| {
+            let extension = extension.to_ascii_lowercase();
+            SUPPORTED_EXTERNAL_SUBTITLE_EXTENSIONS.contains(&extension.as_str())
+        })
+        .unwrap_or(false)
+}
+
+fn external_subtitle_extension_priority(extension: &OsStr) -> usize {
+    let normalized = extension
+        .to_str()
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    SUPPORTED_EXTERNAL_SUBTITLE_EXTENSIONS
+        .iter()
+        .position(|candidate| *candidate == normalized)
+        .unwrap_or(usize::MAX)
+}
+
+fn find_matching_external_subtitle_path(video_path: &Path) -> Result<Option<PathBuf>, String> {
+    if !video_path.exists() || !video_path.is_file() {
+        return Ok(None);
+    }
+
+    let Some(video_stem) = video_path.file_stem().and_then(OsStr::to_str) else {
+        return Ok(None);
+    };
+    let Some(parent_path) = video_path.parent() else {
+        return Ok(None);
+    };
+    let normalized_video_stem = video_stem.to_lowercase();
+    let mut candidates = Vec::new();
+
+    for entry in fs::read_dir(parent_path).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let candidate_path = entry.path();
+        if !entry
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_file()
+        {
+            continue;
+        }
+
+        let Some(extension) = candidate_path.extension() else {
+            continue;
+        };
+        if !is_supported_external_subtitle_extension(extension) {
+            continue;
+        }
+
+        let Some(candidate_stem) = candidate_path.file_stem().and_then(OsStr::to_str) else {
+            continue;
+        };
+        if candidate_stem.to_lowercase() != normalized_video_stem {
+            continue;
+        }
+
+        let file_name = candidate_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        candidates.push((
+            external_subtitle_extension_priority(extension),
+            file_name.to_lowercase(),
+            file_name,
+            candidate_path,
+        ));
+    }
+
+    candidates.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+
+    Ok(candidates.into_iter().next().map(|(_, _, _, path)| path))
 }
 
 fn is_transport_stream_path(path: &str) -> bool {
@@ -917,6 +1004,17 @@ fn get_launch_video(state: State<'_, LaunchVideoState>) -> Option<String> {
 }
 
 #[tauri::command]
+fn read_local_file_bytes(path: String) -> Result<Vec<u8>, String> {
+    fs::read(path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn find_matching_external_subtitle(path: String) -> Result<Option<String>, String> {
+    find_matching_external_subtitle_path(Path::new(&path))
+        .map(|match_path| match_path.map(|path| path.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
 fn open_devtools(window: WebviewWindow) -> Result<(), String> {
     window.open_devtools();
     window.set_focus().map_err(|error| error.to_string())
@@ -1124,7 +1222,7 @@ fn list_embedded_subtitle_streams(
 
                 let label = format_stream_label(&title, &language, "Embedded", position);
                 let detail = format_stream_detail(&language, &codec);
-                let detail_parts = vec![detail];
+                let detail_parts = [detail];
 
                 EmbeddedSubtitleStream {
                     index: stream.index,
@@ -1436,7 +1534,7 @@ fn list_embedded_audio_streams(
 
             let label = format_stream_label(&title, &language, "Audio", position);
             let detail = format_stream_detail(&language, &codec);
-            let detail_parts = vec![detail];
+            let detail_parts = [detail];
 
             EmbeddedAudioStream {
                 index: stream.index,
@@ -1534,6 +1632,8 @@ pub fn run() {
         .manage(SyncplayControlState::default())
         .invoke_handler(tauri::generate_handler![
             get_launch_video,
+            read_local_file_bytes,
+            find_matching_external_subtitle,
             open_devtools,
             list_system_fonts,
             list_folder_videos,
@@ -1562,4 +1662,134 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn video_stream(codec_name: &str, pix_fmt: &str) -> FfprobeStream {
+        FfprobeStream {
+            index: 0,
+            codec_type: Some("video".into()),
+            codec_name: Some(codec_name.into()),
+            pix_fmt: Some(pix_fmt.into()),
+            tags: None,
+        }
+    }
+
+    #[test]
+    fn recognizes_supported_extensions_case_insensitively() {
+        assert!(is_supported_video_extension(OsStr::new("MKV")));
+        assert!(is_supported_video_extension(OsStr::new("ts")));
+        assert!(!is_supported_video_extension(OsStr::new("txt")));
+        assert!(is_supported_external_subtitle_extension(OsStr::new("SRT")));
+        assert!(is_supported_external_subtitle_extension(OsStr::new("PGS")));
+        assert!(!is_supported_external_subtitle_extension(OsStr::new("mp4")));
+        assert!(is_transport_stream_path("episode.M2TS"));
+        assert!(!is_transport_stream_path("episode.mp4"));
+    }
+
+    #[test]
+    fn selects_only_the_exact_video_basename_subtitle() {
+        let unique_suffix = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "noir-player-subtitle-match-{}-{unique_suffix}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+
+        let video_path = directory.join("Film.2026.mkv");
+        fs::write(&video_path, b"fixture").unwrap();
+        fs::write(directory.join("Film.2026.ass"), b"ass").unwrap();
+        fs::write(directory.join("Film.2026.srt"), b"srt").unwrap();
+        fs::write(directory.join("Film.2026.es.srt"), b"different stem").unwrap();
+        fs::write(directory.join("Film.2026.subtitled.mp4"), b"video").unwrap();
+
+        let match_path = find_matching_external_subtitle_path(&video_path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            match_path.file_name().and_then(OsStr::to_str),
+            Some("Film.2026.srt")
+        );
+
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn detects_browser_fallback_codecs_and_pixel_formats() {
+        assert!(!video_stream_requires_browser_fallback(&video_stream(
+            "h264", "yuv420p"
+        )));
+        assert!(video_stream_requires_browser_fallback(&video_stream(
+            "hevc", "yuv420p"
+        )));
+        assert!(video_stream_requires_browser_fallback(&video_stream(
+            "h264",
+            "yuv420p10le"
+        )));
+        assert!(video_stream_requires_browser_fallback(&video_stream(
+            "h264", "yuv422p"
+        )));
+    }
+
+    #[test]
+    fn builds_a_complete_vod_hls_playlist() {
+        let session = TsStreamSession {
+            path: "episode.ts".into(),
+            duration_seconds: 3.5,
+            segment_seconds: 2.0,
+            segment_count: 2,
+            cache_dir: PathBuf::from("cache"),
+            ffmpeg_path: PathBuf::from("ffmpeg"),
+            copy_video: true,
+            copy_audio: true,
+        };
+        let playlist = build_hls_playlist(&session);
+        assert!(playlist.starts_with("#EXTM3U"));
+        assert!(playlist.contains("#EXT-X-TARGETDURATION:2"));
+        assert!(playlist.contains("#EXTINF:2.000"));
+        assert!(playlist.contains("#EXTINF:1.500"));
+        assert!(playlist.contains("segment/0.ts"));
+        assert!(playlist.contains("segment/1.ts"));
+        assert!(playlist.ends_with("#EXT-X-ENDLIST\n"));
+    }
+
+    #[test]
+    fn parses_control_server_ports() {
+        assert_eq!(parse_server_port(SYNCPLAY_CONTROL_ADDR).unwrap(), 32123);
+        assert!(parse_server_port("127.0.0.1:not-a-port").is_err());
+    }
+
+    #[test]
+    fn keeps_syncplay_wire_format_stable() {
+        let command = SyncplayCommand {
+            command: "seek".into(),
+            position: Some(12.5),
+            rate: None,
+            path: None,
+            message: None,
+            muted: None,
+        };
+        let command_json = serde_json::to_value(command).unwrap();
+        assert_eq!(command_json["command"], "seek");
+        assert_eq!(command_json["position"], 12.5);
+
+        let status = SyncplayStatus {
+            loaded: true,
+            paused: false,
+            position: 12.5,
+            duration: 90.0,
+            rate: 1.25,
+            path: Some("C:\\Videos\\episode.mkv".into()),
+            file_name: Some("episode.mkv".into()),
+        };
+        let status_json = serde_json::to_value(status).unwrap();
+        assert_eq!(status_json["fileName"], "episode.mkv");
+        assert_eq!(status_json["path"], "C:\\Videos\\episode.mkv");
+    }
 }

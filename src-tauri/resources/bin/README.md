@@ -12,23 +12,30 @@ The app can fall back to `ffmpeg` and `ffprobe` from your system `PATH`.
 
 ## For building a self-contained installer
 
-Place these files here before running:
+From the repository root, stage and verify the complete native runtime before
+running:
 
 ```powershell
+npm run stage:native
+npm run verify:native
 npm run tauri build
 ```
 
-Expected files:
+Expected files inside this directory:
 
 - `src-tauri/resources/bin/ffmpeg.exe`
 - `src-tauri/resources/bin/ffprobe.exe`
 
 ## Helper script
 
-If you already have FFmpeg installed and available in `PATH`, run:
+If FFmpeg is installed but not available in `PATH`, provide its directory:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/stage-ffmpeg.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stage-native-runtime.ps1 `
+  -FfmpegDirectory 'C:\path\to\ffmpeg\bin'
 ```
 
-That script copies `ffmpeg.exe` and `ffprobe.exe` into this folder.
+The helper copies `ffmpeg.exe` and `ffprobe.exe` into this folder. When Scoop
+provides FFmpeg through a shim, it resolves the package's real `current\bin`
+executables instead of copying the small shim launcher. Cargo also refreshes
+`target\debug\resources\bin` whenever either staged binary changes.

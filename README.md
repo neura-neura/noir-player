@@ -1,319 +1,141 @@
 # Noir Player
 
-<p align="center">
-  <img src="public/icon.png" alt="Noir Player logo" width="180" />
-</p>
+Noir Player is a Windows-first desktop video player built with Tauri 2,
+React 18, TypeScript, Vite, native libmpv, Plyr/Hls.js browser fallback, and
+FFmpeg/FFprobe compatibility tools. The core player works with no plugins
+selected.
 
-Noir Player is a Windows desktop video player built with Tauri, React, TypeScript, and Plyr.
+## Playback
 
-It focuses on local playback with a workflow that is especially useful when you need:
+- Native libmpv is the primary desktop engine for HEVC and high bit-depth media.
+- HTMLMediaElement/Plyr/Hls.js and the FFmpeg-prepared source are the fallback
+  path when native initialization or loading fails. `.ts`/`.m2ts` files use
+  the host-owned loopback HLS server; ordinary desktop files remain on libmpv.
+- React controls, captions, playlist, embedded subtitle/audio selection,
+  fullscreen, resize, and Syncplay operate above the selected engine.
+- Local paths stay in host-only code. Public plugin snapshots expose a display
+  name, source kind, engine, and playback state instead.
 
-- file association support (`Open with Noir Player`)
-- manual subtitle loading
-- embedded subtitle selection
-- embedded audio track switching
-- persistent subtitle styling and sync controls
-- DevTools access for inspecting the subtitle layer
+## Plugin system
 
-## Highlights
+Plugins run in the same WebView as the host. The runtime is capability-gated
+and auditable, but this is not a sandbox for hostile code. The Plugin manager
+can toggle built-in plugins and install reviewed GitHub repositories that
+publish a `noir.plugin.json` descriptor plus a self-contained ESM entry.
 
-- Open local videos from the app or from Windows file association.
-- Drag and drop videos and subtitle files into the app.
-- Load external subtitles from `.srt`, `.vtt`, `.ass`, `.ssa`, and `.zip`.
-- Select embedded subtitle tracks detected from the video container.
-- Select embedded audio tracks and use automatic fallback for codecs the WebView may not play natively.
-- Adjust subtitle offset, font, size, weight, colors, opacity, position, width, padding, radius, line height, and letter spacing.
-- Keep preferences persisted across app restarts.
-- Switch the UI between English, Spanish, and Chinese.
-- Open DevTools with the built-in button or `Ctrl + Shift + I`.
+The explicit build-time selection lives in
+[`noir.plugins.config.ts`](noir.plugins.config.ts). A loader such as
+`() => import('@noir-player/plugin-playback-stats')` is lazy and creates a
+separate Vite chunk. Removing the selection removes plugin execution and keeps
+the core player usable.
 
-## Current Subtitle Support
+For a core-only smoke, set `VITE_NOIR_DISABLE_PLUGINS=1` for the Vite/Tauri
+process; the normal selection remains unchanged.
 
-### External subtitles
+Open `Plugin manager` in the header to enable or disable plugins, review
+requested permissions, remove GitHub plugins, and add a repository URL. New
+GitHub entries start disabled and require a restart after installation or
+permission changes. Third-party entries are fetched only from HTTPS GitHub
+raw content, can declare a SHA-256 integrity digest, and never receive raw
+Tauri or host internals.
 
-- `.srt`
-- `.vtt`
-- `.ass`
-- `.ssa`
-- `.zip` containing `.srt`, `.vtt`, `.ass`, or `.ssa`
+The first-party `@noir-player/plugin-playback-stats` package demonstrates
+events, snapshots, the core command bus, UI slots, config, namespaced storage,
+settings, telemetry, and cleanup. `@noir-player/plugin-mpv-lab` is a non-selected
+fixture for testing `native.mpv.read` and the deliberately high-risk
+`native.mpv.raw` escape hatch. Raw access requires both a host grant and
+`riskAcknowledgements: ['native.mpv.raw']`; it accepts arbitrary mpv command
+and property names and can disrupt playback.
 
-### Embedded subtitles
+Public authoring documentation is in [`docs/plugins/authoring.md`](docs/plugins/authoring.md),
+with the API, security, testing, and example guides beside it.
 
-- Text subtitle tracks that `ffmpeg` can extract and convert to WebVTT
-- Basic support for `ASS/SSA`
-
-### Important limitation for `ASS/SSA`
-
-`ASS/SSA` subtitles are currently converted to a basic text overlay.
-
-That means:
-
-- text and timing are preserved
-- advanced ASS positioning is not preserved
-- karaoke effects are not preserved
-- complex animation is not preserved
-- custom ASS drawing/vector effects are not preserved
-
-## Current Audio Support
-
-- Detects embedded audio tracks from the container
-- Supports switching between detected audio tracks
-- Uses bundled `ffmpeg` / `ffprobe` as fallback for codecs that the WebView may not decode directly, including common cases such as `EAC3`
-
-## Current Video Support
-
-- Desktop playback uses native `libmpv` with GPU-accelerated decoding when available, including HEVC/H.265 and 10/12/14/16-bit video
-- React controls, custom subtitles, playlist behavior, and Syncplay commands remain in the WebView UI
-- If the native DLLs are unavailable, the app falls back to its FFmpeg-compatible playback path
-
-## Tech Stack
-
-- Tauri 2
-- React 18
-- TypeScript
-- Vite
-- Plyr
-- Rust
-- FFmpeg / FFprobe bundled with the desktop build
-  - not committed to GitHub because the Windows binaries exceed GitHub's regular file size limit
-
-## Syncplay integration
-
-This build exposes a loopback-only control API for the Noir Player adapter in the
-[Syncplay-Noir fork](https://github.com/neura-neura/syncplay-noir). It listens on
-`127.0.0.1:32123`, so video data never passes through the Syncplay server.
-
-The API supports health/status queries and the playback commands needed by
-Syncplay: open a local file, play, pause, seek, and change playback rate. Each
-participant keeps a local copy of the video and only the small control events
-cross the network through Syncplay.
-
-## Requirements
-
-### For running the packaged app
-
-- Windows 10 or Windows 11
-- Microsoft Edge WebView2 Runtime
-
-### For local development
-
-- Node.js 20+ recommended
-- npm
-- Rust stable toolchain
-- Visual Studio Build Tools for Rust/Tauri on Windows
-- WebView2 Runtime
-
-Official setup references:
-
-- [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)
-- [Rust installation](https://www.rust-lang.org/tools/install)
-- [Node.js](https://nodejs.org/)
-
-## Project Structure
-
-```text
-simplevideoplayer/
-├─ public/                  Static assets and bundled web font assets
-├─ src/                     React frontend
-│  ├─ i18n/                 Modular translations
-│  └─ lib/                  Subtitle parsing and helpers
-├─ src-tauri/               Rust/Tauri desktop layer
-│  ├─ icons/                App icons
-│  ├─ resources/bin/        Bundled ffmpeg.exe and ffprobe.exe
-│  └─ src/                  Native commands and app bootstrap
-├─ package.json
-└─ README.md
-```
-
-## Install Dependencies
-
-```bash
-npm install
-```
-
-## FFmpeg Setup
-
-For local development, Noir Player can use `ffmpeg` and `ffprobe` from your system `PATH`.
-
-If you want to build a self-contained installer that bundles those binaries inside the app, you need to stage them into:
-
-```text
-src-tauri/resources/bin/
-```
-
-Expected files:
-
-- `src-tauri/resources/bin/ffmpeg.exe`
-- `src-tauri/resources/bin/ffprobe.exe`
-
-If FFmpeg is already installed and available in `PATH`, you can copy both binaries into the project with:
+## Development commands
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/stage-ffmpeg.ps1
+npm ci
+npm run dev
+npm run typecheck
+npm run lint
+npm test
+npm run test:unit
+npm run test:integration
+npm run test:components
+npm run test:contracts
+npm run test:coverage
+npm run test:e2e
+npm run build
+npm run check:rust
+npm run check
 ```
 
-If you skip this step:
+`npm run check` runs the frontend/workspace boundary checks, lint, tests, and
+production build. `npm run check:rust` runs `cargo fmt --check`, clippy with
+`-D warnings`, and Rust tests. `npm run tauri dev` runs the desktop shell;
+`npm run tauri build` creates the installer.
 
-- `npm run tauri dev` can still work as long as `ffmpeg` and `ffprobe` are available in `PATH`
-- a fully self-contained Windows installer will not bundle those executables automatically
+For a self-contained Windows build, stage and hash the complete native runtime
+(libmpv DLLs plus FFmpeg/FFprobe) with one command:
 
-## Run in Development
-
-```bash
-npm run tauri dev
+```powershell
+npm run stage:native
+npm run verify:native
 ```
 
-This starts:
+The native staging manifest at
+[`scripts/native-runtime-manifest.json`](scripts/native-runtime-manifest.json)
+pins the expected Windows x86_64 SHA-256 values. The helper resolves Scoop
+shims to the real FFmpeg executables, runs
+`tauri-plugin-libmpv-api setup-lib` for the matching libmpv DLLs, and fails on
+missing or unexpected artifacts. If FFmpeg is not on `PATH`, pass an installed
+directory with `-FfmpegDirectory`; the DLLs and executables remain ignored
+because they are large generated runtime artifacts, but a clean checkout can
+recreate and verify them deterministically.
 
-- the Vite frontend
-- the Tauri desktop shell
-- the desktop window for Noir Player
-
-## Build the Installer
-
-```bash
-npm run tauri build
-```
-
-Before building a portable/self-contained installer, make sure the FFmpeg staging step above has been completed.
-
-Typical output files are generated under:
+## Project structure
 
 ```text
-src-tauri/target/release/bundle/nsis/
-src-tauri/target/release/bundle/msi/
+noir-player/
+├─ packages/
+│  ├─ plugin-api/                 @noir-player/plugin-api
+│  ├─ plugin-test-utils/          public-contract fakes and assertions
+│  ├─ plugin-playback-stats/      first-party vertical plugin
+│  └─ plugin-mpv-lab/             non-selected mpv capability fixture
+├─ src/
+│  ├─ app/                        host bootstrap and runtime wiring
+│  ├─ player/
+│  │  ├─ core/                    snapshots, command bridge, seams
+│  │  ├─ engines/                 PlaybackEngine adapters and resolver
+│  │  └─ adapters/                NativeBridge and surface coordinator
+│  ├─ plugins/runtime/             loader, lifecycle, grants, registries
+│  ├─ plugins/ui/                  provider, nominal slots, boundaries
+│  ├─ App.tsx                      legacy UI being migrated by vertical seams
+│  └─ lib/subtitles.ts             subtitle parser/sanitizer
+├─ src-tauri/                     Rust/Tauri commands and libmpv integration
+├─ noir.plugins.config.ts         explicit lazy plugin selection
+└─ tests/                          unit, contract, component, integration, E2E
 ```
 
-Examples:
+## Existing media features
 
-- `Noir Player_0.1.0_x64-setup.exe`
-- `Noir Player_0.1.0_x64_en-US.msi`
+Noir Player supports local file association, drag-and-drop, SRT/VTT/ASS/SSA
+and ZIP subtitles, embedded text subtitles/audio tracks, persistent subtitle
+styling, English/Spanish/Chinese UI, and loopback-only Syncplay control on
+`127.0.0.1:32123`. ASS/SSA is rendered as a sanitized basic text overlay, so
+advanced positioning and karaoke effects are not preserved.
 
-## How to Use
+## Security notes
 
-### Open a video
+The Tauri CSP explicitly lists local assets, IPC, loopback HLS/Syncplay, Vite
+development HMR, and the existing optional jsDelivr font stylesheet. The asset
+scope remains broad because users can open arbitrary local files; this is a
+documented host risk, not a plugin privilege. Tauri capabilities apply to the
+shared `main` WebView and do not sandbox one JavaScript module from another.
 
-You can open a video in any of these ways:
-
-- launch Noir Player and click `Open video`
-- drag a video into the window
-- right click a compatible video in Windows and use `Open with Noir Player`
-
-### Load subtitles
-
-You can:
-
-- drag an external subtitle file into the app
-- click `Load subtitles`
-- choose an embedded subtitle track from the subtitle panel
-
-### Change audio tracks
-
-If the container has multiple audio tracks:
-
-- open the subtitle/load panel
-- look for the audio track list
-- click the track you want to hear
-
-### Inspect subtitle styling
-
-Use:
-
-- the `Inspect` button
-- or `Ctrl + Shift + I`
-
-The main rendered subtitle element is:
-
-```text
-.caption-text
-```
-
-## Persistence
-
-The app persists user preferences such as:
-
-- selected language
-- subtitle style settings
-- font configuration
-- open behavior preferences
-- window size and position
-- optional remembered subtitle offset
-
-## Fonts
-
-The app supports:
-
-- installed system fonts
-- a bundled local Gotham Pro stylesheet by default
-- loading a custom remote CSS font stylesheet manually
-
-The default bundled Gotham Pro stylesheet is stored locally in:
-
-```text
-public/vendor/gotham-pro-font/
-```
-
-## File Associations
-
-The installer registers common video file associations so the player can be selected from Windows `Open with`.
-
-Formats currently configured include:
-
-- `.mp4`
-- `.mkv`
-- `.avi`
-- `.mov`
-- `.m4v`
-- `.webm`
-- `.ts`
-- `.m2ts`
-- `.wmv`
-- `.flv`
-
-## No API Keys Required
-
-This project does not require API keys to run.
-
-The repository should not contain API keys, tokens, passwords, or local secret files.
-
-## Known Limitations
-
-- Advanced `ASS/SSA` styling is not fully preserved.
-- Some codecs may require the bundled ffmpeg-based fallback path before audio becomes available.
-- The project is currently oriented to Windows desktop usage.
-
-## Troubleshooting
-
-### The video opens but there is no sound
-
-- Try switching audio tracks from the panel.
-- If the track uses a codec such as `EAC3`, the app may prepare a compatible fallback track first.
-- Wait a moment after opening a large file so the bundled audio fallback can prepare in the background.
-
-### The video has audio but the picture is black
-
-- Desktop builds use native libmpv playback instead of WebView2 for the video surface.
-- Run `npx tauri-plugin-libmpv-api setup-lib` after cloning and include `src-tauri/lib/libmpv-wrapper.dll` and `src-tauri/lib/libmpv-2.dll` in packaged builds.
-- If libmpv cannot load, the app falls back to FFmpeg and may prepare a compatible copy.
-
-### Embedded subtitles are detected but do not look identical to the source
-
-- That is expected for `ASS/SSA`.
-- The current implementation keeps timing and text, but not full ASS visual behavior.
-
-### DevTools does not open
-
-- Use the in-app `Inspect` button.
-- If needed, try `Ctrl + Shift + I`.
-
-## Development Notes
-
-- Frontend source lives in [src](src).
-- Native desktop logic lives in [src-tauri/src](src-tauri/src).
-- Translations are modular inside [src/i18n](src/i18n).
-- Bundled ffmpeg tools live in [src-tauri/resources/bin](src-tauri/resources/bin).
-- The repo does not store `ffmpeg.exe` / `ffprobe.exe` directly because GitHub rejects files larger than 100 MB in a normal repo.
+See [`docs/architecture/plugin-system-decisions.md`](docs/architecture/plugin-system-decisions.md)
+and [`docs/plugins/security.md`](docs/plugins/security.md) for the trust model,
+capabilities, raw mpv audit, DLL staging, redaction, and future isolation path.
 
 ## License
 
-See [LICENSE](LICENSE).
+See [`LICENSE`](LICENSE).

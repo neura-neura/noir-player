@@ -1,12 +1,9 @@
-﻿import { useEffect, useRef, useState } from 'react';
+﻿import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, DragEvent, MouseEvent } from 'react';
-import { convertFileSrc, invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { getCurrentWebview } from '@tauri-apps/api/webview';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { type EventCallback, type UnlistenFn } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import DOMPurify from 'dompurify';
-import Hls from 'hls.js';
+import type Hls from 'hls.js';
 import {
   Maximize2,
   Minimize2,
@@ -15,17 +12,15 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import Plyr from 'plyr';
+import type Plyr from 'plyr';
 import 'plyr/dist/plyr.css';
 import {
   command as mpvCommand,
   destroy as destroyMpv,
-  getProperty as getMpvProperty,
   init as initMpv,
   observeProperties as observeMpvProperties,
   listenEvents as listenMpvEvents,
   setProperty as setMpvProperty,
-  setVideoMarginRatio,
   type MpvObservableProperty,
 } from 'tauri-plugin-libmpv-api';
 import {
@@ -44,6 +39,11 @@ import {
   type AppLocale,
   type AppMessages,
 } from '@/i18n';
+import { PluginManagerPanel, usePluginRuntime, PluginSlot } from '@/plugins/ui';
+import { PLUGIN_MANAGER_MESSAGES } from '@/plugins/ui/plugin-manager-messages';
+import { useAppPluginBridge } from '@/player/core/use-app-plugin-bridge';
+import { createTauriNativeBridge, type NativeUnsubscribe } from '@/player/adapters/native-bridge';
+import { NativeSurfaceCoordinator } from '@/player/adapters/native-surface-coordinator';
 
 type VideoSource = {
   src: string;
@@ -80,6 +80,11 @@ type VideoOpenOptions = {
   preservePlaybackState?: PlaybackStateSnapshot;
 };
 
+type SubtitleSelectionOptions = {
+  automatic?: boolean;
+  expectedVideoPath?: string;
+};
+
 type SubtitleStyle = {
   fontSize: number;
   textColor: string;
@@ -98,16 +103,27 @@ type SubtitleStyle = {
   textShadow: boolean;
 };
 
+type NativeSubtitleDisplayMode = 'overlay' | 'native';
+
 type OpenFilePayload = {
   path: string;
 };
 
 type SyncplayCommand = {
-  command: 'open' | 'play' | 'pause' | 'seek' | 'rate' | 'message';
+  command:
+    | 'open'
+    | 'play'
+    | 'pause'
+    | 'seek'
+    | 'rate'
+    | 'message'
+    | 'mute'
+    | 'subtitle';
   path?: string;
   position?: number;
   rate?: number;
   message?: string;
+  muted?: boolean;
 };
 
 type TsStreamSource = {
@@ -150,6 +166,23 @@ type WebAudioRefs = {
   gain: GainNode;
 };
 
+type BrowserPlaybackLibraries = {
+  readonly Hls: typeof import('hls.js').default;
+  readonly Plyr: typeof import('plyr').default;
+};
+
+let browserPlaybackLibrariesPromise: Promise<BrowserPlaybackLibraries> | null = null;
+
+function loadBrowserPlaybackLibraries(): Promise<BrowserPlaybackLibraries> {
+  browserPlaybackLibrariesPromise ??= Promise.all([import('hls.js/light'), import('plyr')]).then(
+    ([hlsModule, plyrModule]) => ({
+      Hls: hlsModule.default,
+      Plyr: plyrModule.default,
+    }),
+  );
+  return browserPlaybackLibrariesPromise;
+}
+
 const MPV_OBSERVED_PROPERTIES = [
   ['pause', 'flag'],
   ['time-pos', 'double', 'none'],
@@ -165,7 +198,7 @@ const MPV_OBSERVED_PROPERTIES = [
 
 const VIDEO_ACCEPT =
   'video/*,.mkv,.avi,.mov,.m4v,.webm,.ts,.m2ts,.wmv,.flv,.mp4';
-const SUBTITLE_ACCEPT = '.srt,.vtt,.ass,.ssa,.zip';
+const SUBTITLE_ACCEPT = '.srt,.vtt,.ass,.ssa,.sup,.pgs,.idx,.sub,.zip';
 const VIDEO_EXTENSIONS = [
   'mp4',
   'mkv',
@@ -178,7 +211,17 @@ const VIDEO_EXTENSIONS = [
   'wmv',
   'flv',
 ];
-const SUBTITLE_EXTENSIONS = ['srt', 'vtt', 'ass', 'ssa', 'zip'];
+const SUBTITLE_EXTENSIONS = [
+  'srt',
+  'vtt',
+  'ass',
+  'ssa',
+  'sup',
+  'pgs',
+  'idx',
+  'sub',
+  'zip',
+];
 const APP_NAME = 'Noir Player';
 const STYLE_STORAGE_KEY = 'noir-web-player:subtitle-style';
 const STYLE_PRESET_VERSION_STORAGE_KEY =
@@ -279,6 +322,26 @@ function hexToRgbTuple(hexColor: string): string {
   const blue = Number.parseInt(normalized.slice(4, 6), 16);
 
   return `${red} ${green} ${blue}`;
+}
+
+function normalizeHexColor(hexColor: string): string {
+  const rawHex = hexColor.replace('#', '').trim();
+  const expandedHex =
+    rawHex.length === 3
+      ? rawHex
+          .split('')
+          .map((segment) => segment + segment)
+          .join('')
+      : rawHex;
+
+  return /^[0-9a-f]{6}$/i.test(expandedHex) ? expandedHex : 'ffffff';
+}
+
+function toMpvColor(hexColor: string, alpha = 1): string {
+  const alphaHex = Math.round(clamp(alpha, 0, 1) * 255)
+    .toString(16)
+    .padStart(2, '0');
+  return `#${alphaHex}${normalizeHexColor(hexColor)}`.toUpperCase();
 }
 
 function restoreClassicDefaultStyle(
@@ -488,12 +551,42 @@ function isVideoFileName(fileName: string): boolean {
 }
 
 function isSubtitleFileName(fileName: string): boolean {
-  return /\.(srt|vtt|ass|ssa|zip)$/i.test(fileName);
+  return /\.(srt|vtt|ass|ssa|sup|pgs|idx|sub|zip)$/i.test(fileName);
+}
+
+function isNativeOnlySubtitleFileName(fileName: string): boolean {
+  return /\.(sup|pgs|idx)$/i.test(fileName);
+}
+
+/**
+ * Keep effect subscriptions stable while allowing them to call the latest
+ * render's implementation. App is still being extracted incrementally, so
+ * this avoids turning every legacy action into a dependency-driven teardown.
+ */
+function useStableEvent<T extends (...args: any[]) => any>(callback: T): T {
+  const callbackRef = useRef(callback);
+  callbackRef.current = callback;
+  return useCallback(((...args: Parameters<T>) => callbackRef.current(...args)) as T, []);
 }
 
 function isDesktopApp(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
+
+let cachedNativeBridge: ReturnType<typeof createTauriNativeBridge> | null = null;
+
+function getNativeBridge() {
+  if (cachedNativeBridge === null || (!cachedNativeBridge.isDesktop && isDesktopApp())) {
+    cachedNativeBridge = createTauriNativeBridge();
+  }
+  return cachedNativeBridge;
+}
+
+const invoke = <T,>(commandName: string, args?: Record<string, unknown>) =>
+  getNativeBridge().invoke<T>(commandName, args);
+const listen = <T,>(eventName: string, callback: EventCallback<T>) =>
+  getNativeBridge().listen<T>(eventName, callback);
+const convertFileSrc = (filePath: string) => getNativeBridge().convertFileSrc(filePath);
 
 function areFilePathsEqual(firstPath?: string, secondPath?: string): boolean {
   if (!firstPath || !secondPath) {
@@ -864,12 +957,14 @@ export default function App() {
   const [videoSource, setVideoSource] = useState<VideoSource | null>(null);
   const [playlistVideos, setPlaylistVideos] = useState<PlaylistVideo[]>([]);
   const [playlistLoading, setPlaylistLoading] = useState(false);
+  const [playlistRefreshRevision, setPlaylistRefreshRevision] = useState(0);
   const [subtitleTrack, setSubtitleTrack] = useState<SubtitleTrack | null>(
     null,
   );
   const [activeCueIndex, setActiveCueIndex] = useState(-1);
   const [videoAspectRatio, setVideoAspectRatio] = useState<number | null>(null);
   const [panelVisible, setPanelVisible] = useState(false);
+  const [pluginManagerVisible, setPluginManagerVisible] = useState(false);
   const [panelTab, setPanelTab] = useState<PanelTab>('load');
   const [pageDropActive, setPageDropActive] = useState(false);
   const [dropOverlayMessage, setDropOverlayMessage] = useState(
@@ -960,6 +1055,13 @@ export default function App() {
   const externalAudioRef = useRef<HTMLAudioElement | null>(null);
   const injectedSubtitleTrackRef = useRef<HTMLTrackElement | null>(null);
   const injectedSubtitleObjectUrlRef = useRef<string | null>(null);
+  const nativeExternalSubtitlePathRef = useRef<string | null>(null);
+  const nativeSubtitleDisplayModeRef = useRef<NativeSubtitleDisplayMode | null>(
+    null,
+  );
+  const nativeSubtitleOperationQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const autoMatchedSubtitlePathRef = useRef<string | null>(null);
+  const subtitleSelectionRevisionRef = useRef(0);
   const autoPreparedAudioKeyRef = useRef<string | null>(null);
   const preparedAudioSourcesRef = useRef<Record<string, string>>({});
   const preparingAudioPromisesRef = useRef<Record<string, Promise<string | null>>>(
@@ -1003,9 +1105,27 @@ export default function App() {
   const fullscreenTransitionTimerRef = useRef<number | null>(null);
   const nativeVideoRefreshTimersRef = useRef<number[]>([]);
   const nativeVideoTransitionHiddenRef = useRef(false);
-  const nativeVideoMarginQueueRef = useRef<Promise<void>>(Promise.resolve());
   const nativeVideoMarginUpdateRef = useRef<(() => Promise<void>) | null>(null);
+  const nativeSurfaceCoordinatorRef = useRef<NativeSurfaceCoordinator | null>(null);
+  const nativeBridgeRef = useRef<ReturnType<typeof createTauriNativeBridge> | null>(null);
+  const mpvStatusRef = useRef(mpvStatus);
+  const nativeSourceRef = useRef(videoSource?.kind === 'mpv');
+  const currentVideoPathRef = useRef(videoSource?.path);
+  mpvStatusRef.current = mpvStatus;
+  nativeSourceRef.current = videoSource?.kind === 'mpv';
+  currentVideoPathRef.current = videoSource?.path;
+  if (nativeBridgeRef.current === null) {
+    nativeBridgeRef.current = getNativeBridge();
+  }
+  if (nativeSurfaceCoordinatorRef.current === null) {
+    nativeSurfaceCoordinatorRef.current = new NativeSurfaceCoordinator({
+      bridge: nativeBridgeRef.current,
+      isMpvAvailable: () => mpvStatusRef.current === 'ready' && nativeSourceRef.current,
+      logger: (message) => console.warn(`[Noir surface] ${message}`),
+    });
+  }
   const messages = MESSAGES[language];
+  const pluginRuntime = usePluginRuntime();
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const dockVisible = playbackControlsVisible || panelVisible;
@@ -1095,6 +1215,27 @@ export default function App() {
     ? ({ '--player-aspect-ratio': String(videoAspectRatio) } as CSSProperties)
     : undefined;
 
+  const requestNativeVideoRedrawEvent = useStableEvent(requestNativeVideoRedraw);
+  const retryNativePlaybackWithBrowserEvent = useStableEvent(retryNativePlaybackWithBrowser);
+  const applyNativeFullscreenEvent = useStableEvent(applyNativeFullscreen);
+  const refreshAudioTracksEvent = useStableEvent(refreshAudioTracks);
+  const refreshEmbeddedSubtitleTracksEvent = useStableEvent(refreshEmbeddedSubtitleTracks);
+  const updateSubtitleCueEvent = useStableEvent(updateSubtitleCue);
+  const capturePlaybackStateEvent = useStableEvent(capturePlaybackState);
+  const openVideoFromPathEvent = useStableEvent(openVideoFromPath);
+  const exitPlayerFullscreenEvent = useStableEvent(exitPlayerFullscreen);
+  const seekPlaybackByEvent = useStableEvent(seekPlaybackBy);
+  const toggleNativeFullscreenEvent = useStableEvent(toggleNativeFullscreen);
+  const togglePlayerFullscreenEvent = useStableEvent(togglePlayerFullscreen);
+  const setVideoInternalAudioMutedEvent = useStableEvent(setVideoInternalAudioMuted);
+  const selectAudioTrackEvent = useStableEvent(selectAudioTrack);
+  const prepareAudioTrackEvent = useStableEvent(prepareAudioTrack);
+  const loadRemoteFontStylesheetEvent = useStableEvent(loadRemoteFontStylesheet);
+  const handleDroppedPathEvent = useStableEvent(handleDroppedPath);
+  const openInspectorEvent = useStableEvent(openInspector);
+  const applyNativeSubtitleStyleEvent = useStableEvent(applyNativeSubtitleStyle);
+  const autoLoadMatchingSubtitleEvent = useStableEvent(autoLoadMatchingSubtitle);
+
   useEffect(() => {
     mpvPlaybackStateRef.current = {
       paused: mpvPaused,
@@ -1110,7 +1251,6 @@ export default function App() {
     }
 
     let active = true;
-    const currentWindow = getCurrentWindow();
     const nextPaint = () =>
       new Promise<void>((resolve) => {
         window.requestAnimationFrame(() => resolve());
@@ -1131,7 +1271,7 @@ export default function App() {
       setDesktopWindowReady(true);
       await nextPaint();
       if (active) {
-        await currentWindow.show().catch((error) => {
+        await getNativeBridge().showWindow().catch((error) => {
           console.error('[Noir window] unable to reveal the main window', error);
         });
       }
@@ -1151,13 +1291,13 @@ export default function App() {
 
     let active = true;
     const syncFullscreenState = () => {
-      void getCurrentWindow()
+      void getNativeBridge()
         .isFullscreen()
         .then((isFullscreen) => {
           if (active) {
             setNativeFullscreen(isFullscreen);
             if (!nativeVideoTransitionHiddenRef.current) {
-              requestNativeVideoRedraw();
+              requestNativeVideoRedrawEvent();
             }
           }
         })
@@ -1173,7 +1313,7 @@ export default function App() {
       active = false;
       window.removeEventListener('resize', syncFullscreenState);
     };
-  }, [isNativeMpvSource]);
+  }, [isNativeMpvSource, requestNativeVideoRedrawEvent]);
 
   function clearPlaybackControlsHideTimer() {
     if (playbackControlsHideTimerRef.current !== null) {
@@ -1218,16 +1358,6 @@ export default function App() {
     nativeVideoRefreshTimersRef.current = [];
   }
 
-  function enqueueNativeVideoMarginUpdate(
-    update: () => Promise<void>,
-  ): Promise<void> {
-    const queuedUpdate = nativeVideoMarginQueueRef.current
-      .catch(() => undefined)
-      .then(update);
-    nativeVideoMarginQueueRef.current = queuedUpdate.catch(() => undefined);
-    return queuedUpdate;
-  }
-
   async function setNativeVideoTransitionHidden(hidden: boolean) {
     if (!isNativeMpvSource) {
       return;
@@ -1236,18 +1366,19 @@ export default function App() {
     nativeVideoTransitionHiddenRef.current = hidden;
 
     if (hidden) {
-      await enqueueNativeVideoMarginUpdate(() =>
-        setVideoMarginRatio({
-          left: 0.5,
-          right: 0.5,
-          top: 0.5,
-          bottom: 0.5,
-        }),
-      );
+      nativeSurfaceCoordinatorRef.current?.setPhase('covering');
+      await nativeSurfaceCoordinatorRef.current?.setMargins({
+        left: 0.5,
+        right: 0.5,
+        top: 0.5,
+        bottom: 0.5,
+      });
       return;
     }
 
+    nativeSurfaceCoordinatorRef.current?.setPhase('fading');
     await nativeVideoMarginUpdateRef.current?.();
+    nativeSurfaceCoordinatorRef.current?.setPhase('ready');
   }
 
   function requestNativeVideoRedraw() {
@@ -1258,11 +1389,9 @@ export default function App() {
     clearNativeVideoRefreshTimers();
     const refreshDelays = [0, 90, 240, 520];
     nativeVideoRefreshTimersRef.current = refreshDelays.map((delay) =>
-      window.setTimeout(() => {
-        nativeVideoMarginUpdateRef.current?.();
-        void mpvCommand('redraw-frame').catch(() => {
-          // Older mpv builds may not expose redraw-frame; the margin update still applies.
-        });
+        window.setTimeout(() => {
+          nativeVideoMarginUpdateRef.current?.();
+        void nativeSurfaceCoordinatorRef.current?.redraw();
       }, delay),
     );
   }
@@ -1272,6 +1401,7 @@ export default function App() {
       clearPlaybackControlsHideTimer();
       clearPlaybackFeedbackHideTimer();
       clearNativeVideoRefreshTimers();
+      nativeSurfaceCoordinatorRef.current?.dispose();
     };
   }, []);
 
@@ -1296,7 +1426,11 @@ export default function App() {
     }
     resetMediaElementBeforeSourceSwap();
     setVideoSource(nextVideo);
+    subtitleSelectionRevisionRef.current += 1;
+    autoMatchedSubtitlePathRef.current = null;
     setSubtitleTrack(null);
+    nativeExternalSubtitlePathRef.current = null;
+    nativeSubtitleDisplayModeRef.current = null;
     setNativeSubtitleTracks([]);
     setNativeAudioTracks([]);
     setActiveEmbeddedTrackId(null);
@@ -1343,20 +1477,6 @@ export default function App() {
     const fileName = getBaseName(path);
 
     try {
-      if (isDesktopApp()) {
-        resetForNewVideo(
-          {
-            src: path,
-            fileName,
-            kind: 'mpv',
-            path,
-          },
-          messages.notices.videoPreparing(fileName),
-          options,
-        );
-        return;
-      }
-
       if (shouldUseStreamingPlayback(fileName)) {
         setNotice(messages.notices.videoPreparing(fileName));
         const streamSource = await invoke<TsStreamSource>('prepare_hls_stream', {
@@ -1375,6 +1495,20 @@ export default function App() {
         return;
       }
 
+      if (isDesktopApp()) {
+        resetForNewVideo(
+          {
+            src: path,
+            fileName,
+            kind: 'mpv',
+            path,
+          },
+          messages.notices.videoPreparing(fileName),
+          options,
+        );
+        return;
+      }
+
       resetForNewVideo(
         {
           src: convertFileSrc(path),
@@ -1386,11 +1520,60 @@ export default function App() {
         options,
       );
     } catch (error) {
+      console.error(
+        '[Noir media] unable to open video path',
+        error instanceof Error ? error.name : 'unknown error',
+      );
       setNotice(
         error instanceof Error
           ? error.message
           : messages.notices.diskReadFailed(fileName),
       );
+    }
+  }
+
+  async function retryNativePlaybackWithBrowser(
+    isActive: () => boolean = () => true,
+  ): Promise<void> {
+    const source = videoSource;
+    if (source?.kind !== 'mpv' || !source.path) {
+      return;
+    }
+
+    const sourcePath = source.path;
+    const preservedPlaybackState =
+      preservedPlaybackStateRef.current || capturePlaybackState();
+    const openOptions: VideoOpenOptions = {
+      panelTab,
+      panelVisible,
+      playOnReady: playOnReadyRef.current,
+      applyOpenPreferences: applyOpenPreferencesRef.current,
+      preservePlaybackState: preservedPlaybackState,
+    };
+
+    setNotice(messages.notices.nativeMpvUnavailable);
+    try {
+      const preparedPath = await invoke<string>('prepare_video_playback_source', {
+        path: sourcePath,
+      });
+      if (!isActive() || videoSource?.path !== sourcePath) {
+        return;
+      }
+
+      resetForNewVideo(
+        {
+          src: convertFileSrc(preparedPath),
+          fileName: source.fileName,
+          kind: 'path',
+          path: sourcePath,
+        },
+        messages.notices.videoDetected(source.fileName),
+        openOptions,
+      );
+    } catch {
+      if (isActive()) {
+        setNotice(messages.notices.diskReadFailed(source.fileName));
+      }
     }
   }
 
@@ -1499,6 +1682,11 @@ export default function App() {
             'keep-open': 'yes',
             'force-window': 'yes',
             pause: 'yes',
+            // The host owns external subtitle selection. This prevents mpv
+            // from rendering a sidecar before Noir can parse it and apply the
+            // player's style, which would also create a duplicate overlay.
+            'sub-auto': 'no',
+            sid: 'no',
           },
           observedProperties: MPV_OBSERVED_PROPERTIES,
         });
@@ -1633,6 +1821,8 @@ export default function App() {
     void (async () => {
       try {
         const mpvSource = toMpvFileUrl(sourcePath);
+        await setMpvProperty('sub-auto', 'no').catch(() => undefined);
+        await setMpvProperty('sid', 'no').catch(() => undefined);
         await mpvCommand('loadfile', [mpvSource, 'replace']);
         // mpv emits `file-loaded` when demuxing has completed. The event and
         // property observers update metadata without polling the native bridge.
@@ -1664,39 +1854,7 @@ export default function App() {
       return;
     }
     mpvFallbackPathRef.current = sourcePath;
-    const preservedPlaybackState =
-      preservedPlaybackStateRef.current || capturePlaybackState();
-    const openOptions: VideoOpenOptions = {
-      panelTab,
-      panelVisible,
-      playOnReady: playOnReadyRef.current,
-      applyOpenPreferences: applyOpenPreferencesRef.current,
-      preservePlaybackState: preservedPlaybackState,
-    };
-
-    setNotice(messages.notices.nativeMpvUnavailable);
-    void invoke<string>('prepare_video_playback_source', { path: sourcePath })
-      .then((preparedPath) => {
-        if (!active || videoSource?.path !== sourcePath) {
-          return;
-        }
-
-        resetForNewVideo(
-          {
-            src: convertFileSrc(preparedPath),
-            fileName: videoSource.fileName,
-            kind: 'path',
-            path: sourcePath,
-          },
-          messages.notices.videoDetected(videoSource.fileName),
-          openOptions,
-        );
-      })
-      .catch(() => {
-        if (active) {
-          setNotice(messages.notices.diskReadFailed(videoSource.fileName));
-        }
-      });
+    void retryNativePlaybackWithBrowserEvent(() => active);
 
     return () => {
       active = false;
@@ -1706,6 +1864,7 @@ export default function App() {
     mpvStatus,
     panelTab,
     panelVisible,
+    retryNativePlaybackWithBrowserEvent,
     videoSource?.fileName,
     videoSource?.kind,
     videoSource?.path,
@@ -1726,7 +1885,7 @@ export default function App() {
     }
 
     handledMpvFileLoadedTickRef.current = mpvFileLoadedTick;
-    requestNativeVideoRedraw();
+    requestNativeVideoRedrawEvent();
 
     const preservedPlaybackState = preservedPlaybackStateRef.current;
     const shouldApplyOpenPreferences = applyOpenPreferencesRef.current;
@@ -1772,10 +1931,13 @@ export default function App() {
         await new Promise((resolve) => window.setTimeout(resolve, 0));
         await setMpvProperty('pause', false);
       }
-      refreshEmbeddedSubtitleTracks();
-      void refreshMediaSubtitleTracks(videoSource.path);
-      void refreshAudioTracks(videoSource.path);
-      updateSubtitleCue();
+      refreshEmbeddedSubtitleTracksEvent();
+      if (videoSource.path) {
+        void refreshMediaSubtitleTracks(videoSource.path);
+        void refreshAudioTracksEvent(videoSource.path);
+        void autoLoadMatchingSubtitleEvent(videoSource.path);
+      }
+      updateSubtitleCueEvent();
 
       const playbackNotice =
         shouldApplyOpenPreferences && promptForSubtitles && !shouldForcePlayOnReady
@@ -1786,7 +1948,7 @@ export default function App() {
       setNotice(playbackNotice);
 
       if (shouldApplyOpenPreferences && fullscreenOnOpen) {
-        await applyNativeFullscreen(true);
+        await applyNativeFullscreenEvent(true);
       }
     })().catch(() => {
       setNotice(messagesRef.current.notices.diskReadFailed(videoSource.fileName));
@@ -1797,6 +1959,12 @@ export default function App() {
     mpvFileLoadedTick,
     mpvStatus,
     promptForSubtitles,
+    applyNativeFullscreenEvent,
+    autoLoadMatchingSubtitleEvent,
+    refreshAudioTracksEvent,
+    refreshEmbeddedSubtitleTracksEvent,
+    requestNativeVideoRedrawEvent,
+    updateSubtitleCueEvent,
     shouldOpenPanelOnVideoReady,
     videoSource,
   ]);
@@ -1844,20 +2012,22 @@ export default function App() {
       return;
     }
 
-    void openVideoFromPath(nextPlaylistVideo.path, {
+    void openVideoFromPathEvent(nextPlaylistVideo.path, {
       panelTab,
       panelVisible,
       playOnReady: true,
       applyOpenPreferences: false,
-      preservePlaybackState: capturePlaybackState(),
+      preservePlaybackState: capturePlaybackStateEvent(),
     });
   }, [
     endPlaybackAction,
+    capturePlaybackStateEvent,
     mpvEndFileTick,
     mpvStatus,
     panelTab,
     panelVisible,
     playlistVideos,
+    openVideoFromPathEvent,
     videoSource,
   ]);
 
@@ -1880,20 +2050,13 @@ export default function App() {
         return Promise.resolve();
       }
 
-      return enqueueNativeVideoMarginUpdate(async () => {
-        if (nativeVideoTransitionHiddenRef.current) {
-          return;
-        }
-
-        await setVideoMarginRatio({
-          left: clamp(rect.left / window.innerWidth, 0, 1),
-          right: clamp(1 - rect.right / window.innerWidth, 0, 1),
-          top: clamp(rect.top / window.innerHeight, 0, 1),
-          bottom: clamp(1 - rect.bottom / window.innerHeight, 0, 1),
-        }).catch(() => {
-          // Ignore margin updates while the native mpv window is changing size.
-        });
-      });
+      if (nativeVideoTransitionHiddenRef.current) return Promise.resolve();
+      return nativeSurfaceCoordinatorRef.current?.setMargins({
+        left: clamp(rect.left / window.innerWidth, 0, 1),
+        right: clamp(1 - rect.right / window.innerWidth, 0, 1),
+        top: clamp(rect.top / window.innerHeight, 0, 1),
+        bottom: clamp(1 - rect.bottom / window.innerHeight, 0, 1),
+      }).catch(() => undefined) ?? Promise.resolve();
     };
     nativeVideoMarginUpdateRef.current = updateVideoMargin;
 
@@ -1914,9 +2077,7 @@ export default function App() {
       if (nativeVideoMarginUpdateRef.current === updateVideoMargin) {
         nativeVideoMarginUpdateRef.current = null;
       }
-      void setVideoMarginRatio({ left: 0, right: 0, top: 0, bottom: 0 }).catch(
-        () => undefined,
-      );
+      void nativeSurfaceCoordinatorRef.current?.reset().catch(() => undefined);
     };
   }, [
     mpvStatus,
@@ -1928,9 +2089,28 @@ export default function App() {
 
   useEffect(() => {
     if (videoSource?.kind === 'mpv') {
-      updateSubtitleCue();
+      updateSubtitleCueEvent();
     }
-  }, [mpvTimePos, subtitleTrack, syncOffsetMs, videoSource?.kind]);
+  }, [mpvTimePos, subtitleTrack, syncOffsetMs, updateSubtitleCueEvent, videoSource?.kind]);
+
+  useEffect(() => {
+    if (
+      !isNativeMpvSource ||
+      mpvStatus !== 'ready' ||
+      nativeSubtitleDisplayModeRef.current !== 'native' ||
+      !nativeExternalSubtitlePathRef.current
+    ) {
+      return;
+    }
+
+    void applyNativeSubtitleStyleEvent();
+  }, [
+    applyNativeSubtitleStyleEvent,
+    isNativeMpvSource,
+    mpvStatus,
+    subtitleStyle,
+    subtitleTrack,
+  ]);
 
   function openVideoFromFile(file: File) {
     const nativePath = (file as File & { path?: string }).path;
@@ -1961,6 +2141,13 @@ export default function App() {
   }
 
   async function fileFromPath(path: string): Promise<File> {
+    if (getNativeBridge().isDesktop) {
+      const bytes = await invoke<number[]>('read_local_file_bytes', { path });
+      return new File([new Uint8Array(bytes)], getBaseName(path), {
+        type: 'application/octet-stream',
+      });
+    }
+
     const response = await fetch(convertFileSrc(path));
     if (!response.ok) {
       throw new Error(messages.notices.diskReadFailed(getBaseName(path)));
@@ -2280,9 +2467,8 @@ export default function App() {
 
       await waitForFrames(2);
 
-      const currentWindow = getCurrentWindow();
-      await currentWindow.setFullscreen(nextFullscreen);
-      const confirmedFullscreen = await currentWindow
+      await getNativeBridge().setFullscreen(nextFullscreen);
+      const confirmedFullscreen = await getNativeBridge()
         .isFullscreen()
         .catch(() => nextFullscreen);
       setNativeFullscreen(confirmedFullscreen);
@@ -2366,22 +2552,30 @@ export default function App() {
 
       if (event.key === 'F11' && isNativeMpvSource) {
         event.preventDefault();
-        void toggleNativeFullscreen();
+        void toggleNativeFullscreenEvent();
       } else if (event.key === 'Escape' && nativeFullscreen) {
         event.preventDefault();
-        void exitPlayerFullscreen();
+        void exitPlayerFullscreenEvent();
       } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
         event.preventDefault();
-        seekPlaybackBy(event.key === 'ArrowLeft' ? -5 : 5);
+        seekPlaybackByEvent(event.key === 'ArrowLeft' ? -5 : 5);
       } else if (event.key.toLowerCase() === 'f') {
         event.preventDefault();
-        void togglePlayerFullscreen();
+        void togglePlayerFullscreenEvent();
       }
     };
 
     window.addEventListener('keydown', handleFullscreenShortcut);
     return () => window.removeEventListener('keydown', handleFullscreenShortcut);
-  }, [isNativeMpvSource, nativeFullscreen, videoSource]);
+  }, [
+    exitPlayerFullscreenEvent,
+    isNativeMpvSource,
+    nativeFullscreen,
+    seekPlaybackByEvent,
+    toggleNativeFullscreenEvent,
+    togglePlayerFullscreenEvent,
+    videoSource,
+  ]);
 
   function capturePlaybackState(): PlaybackStateSnapshot | undefined {
     if (isNativeMpvSource) {
@@ -2464,6 +2658,143 @@ export default function App() {
       URL.revokeObjectURL(injectedSubtitleObjectUrlRef.current);
       injectedSubtitleObjectUrlRef.current = null;
     }
+  }
+
+  function enqueueNativeSubtitleOperation(
+    operation: () => Promise<void>,
+  ): Promise<void> {
+    const nextOperation = nativeSubtitleOperationQueueRef.current.then(
+      operation,
+      operation,
+    );
+    nativeSubtitleOperationQueueRef.current = nextOperation.catch(
+      () => undefined,
+    );
+    return nextOperation;
+  }
+
+  async function clearNativeSubtitleTracksNow(
+    hideNativeTrack = true,
+  ): Promise<void> {
+    // `sub-add`/`sub-remove` are unstable in the distributed Windows wrapper.
+    // Keep the native track hidden while the host owns parsed cues and style.
+    if (hideNativeTrack) {
+      await setMpvProperty('sid', 'no').catch(() => undefined);
+    }
+    await setMpvProperty('sub-auto', 'no').catch(() => undefined);
+  }
+
+  async function clearNativeSubtitleTracks(): Promise<void> {
+    if (mpvStatus !== 'ready') {
+      return;
+    }
+
+    await enqueueNativeSubtitleOperation(clearNativeSubtitleTracksNow);
+  }
+
+  async function applyNativeSubtitleStyleNow(): Promise<void> {
+    if (
+      mpvStatusRef.current !== 'ready' ||
+      !nativeSourceRef.current ||
+      nativeSubtitleDisplayModeRef.current !== 'native'
+    ) {
+      return;
+    }
+
+    const backgroundOpacity = clamp(subtitleStyle.backgroundOpacity, 0, 1);
+    const properties: Array<readonly [string, string | number | boolean]> = [
+      ['sub-font-size', clamp(subtitleStyle.fontSize, 8, 160)],
+      ['sub-font', getFontLabel(subtitleStyle.fontFamily)],
+      ['sub-color', toMpvColor(subtitleStyle.textColor)],
+      ['sub-back-color', toMpvColor(subtitleStyle.backgroundColor, backgroundOpacity)],
+      [
+        'sub-outline-color',
+        toMpvColor(subtitleStyle.backgroundColor, Math.max(backgroundOpacity, 0.35)),
+      ],
+      [
+        'sub-shadow-color',
+        toMpvColor('#000000', subtitleStyle.textShadow ? 0.78 : 0),
+      ],
+      [
+        'sub-border-style',
+        backgroundOpacity > 0 ? 'background-box' : 'outline-and-shadow',
+      ],
+      ['sub-outline-size', clamp(subtitleStyle.paddingX / 8, 0, 16)],
+      [
+        'sub-shadow-offset',
+        subtitleStyle.textShadow ? clamp(subtitleStyle.paddingY / 3, 0, 12) : 0,
+      ],
+      ['sub-pos', clamp(100 - subtitleStyle.bottomOffset, 0, 100)],
+      [
+        'sub-margin-x',
+        subtitleStyle.useCustomMaxWidth
+          ? clamp(Math.round((100 - subtitleStyle.maxWidth) * 10), 0, 1_000)
+          : 0,
+      ],
+      ['sub-spacing', clamp(subtitleStyle.letterSpacing, -10, 10)],
+      ['sub-bold', subtitleStyle.fontWeight >= 600],
+    ];
+
+    // Keep native bridge calls serialized. Slider controls can emit several
+    // updates in one frame and the wrapper is not re-entrant for properties.
+    for (const [property, value] of properties) {
+      await setMpvProperty(property, value).catch(() => undefined);
+    }
+  }
+
+  async function applyNativeSubtitleStyle(): Promise<void> {
+    if (mpvStatus !== 'ready' || !nativeExternalSubtitlePathRef.current) {
+      return;
+    }
+
+    await enqueueNativeSubtitleOperation(applyNativeSubtitleStyleNow);
+  }
+
+  async function loadNativeExternalSubtitle(
+    path: string,
+    displayMode: NativeSubtitleDisplayMode,
+    isOperationCurrent: () => boolean = () => true,
+  ): Promise<void> {
+    if (mpvStatus !== 'ready') {
+      throw new Error('Native playback is still preparing. Try loading the subtitle again in a moment.');
+    }
+
+    await enqueueNativeSubtitleOperation(async () => {
+      if (!isOperationCurrent()) {
+        return;
+      }
+
+      // Always hide an existing mpv selection before installing the host
+      // track. Otherwise an exact-basename sidecar can remain underneath the
+      // React overlay and every manually loaded subtitle is rendered twice.
+      await clearNativeSubtitleTracksNow(true);
+      if (!isOperationCurrent()) {
+        return;
+      }
+
+      if (displayMode === 'native') {
+        const separatorIndex = Math.max(
+          path.lastIndexOf('\\'),
+          path.lastIndexOf('/'),
+        );
+        const subtitleDirectory =
+          separatorIndex >= 0 ? path.slice(0, separatorIndex) : '.';
+        await setMpvProperty('sub-file-paths', subtitleDirectory);
+        await setMpvProperty('sub-auto', 'all');
+        await mpvCommand('rescan-external-files', ['reselect']);
+      }
+      if (!isOperationCurrent()) {
+        return;
+      }
+
+      if (displayMode === 'native') {
+        await setMpvProperty('sub-delay', syncOffsetMs / 1000).catch(
+          () => undefined,
+        );
+      }
+      nativeExternalSubtitlePathRef.current = path;
+      nativeSubtitleDisplayModeRef.current = displayMode;
+    });
   }
 
   function setVideoInternalAudioMuted(shouldMute: boolean) {
@@ -2834,27 +3165,122 @@ export default function App() {
     setNotice(messages.notices.embeddedSubtitleSelected(trackOption.label));
   }
 
-  async function handleSubtitleSelection(fileList: FileList | File[]) {
+  async function handleSubtitleSelection(
+    fileList: FileList | File[],
+    sourcePath?: string,
+    options?: SubtitleSelectionOptions,
+  ) {
     const [file] = Array.from(fileList);
     if (!file) {
       return;
     }
 
+    if (
+      options?.expectedVideoPath &&
+      !areFilePathsEqual(currentVideoPathRef.current, options.expectedVideoPath)
+    ) {
+      return;
+    }
+
+    const filePath = (file as File & { path?: string }).path;
+    const nativeSubtitlePath = sourcePath || filePath;
+    const nativeOnlySubtitle =
+      isNativeMpvSource && isNativeOnlySubtitleFileName(file.name);
+    const selectionRevision = ++subtitleSelectionRevisionRef.current;
+    const isCurrentSelection = () =>
+      selectionRevision === subtitleSelectionRevisionRef.current &&
+      (!options?.expectedVideoPath ||
+        areFilePathsEqual(currentVideoPathRef.current, options.expectedVideoPath));
+
     setSubtitleLoading(true);
-    setNotice(messages.notices.subtitleProcessing(file.name));
+    if (!options?.automatic) {
+      setNotice(messages.notices.subtitleProcessing(file.name));
+    }
 
     try {
-      const nextTrack = await loadSubtitleTrack(file);
+      // SUP/PGS and IDX are image-based subtitle formats. They have no text
+      // cues for the browser parser, but libmpv can render them natively.
+      const nextTrack = nativeOnlySubtitle
+        ? { fileName: file.name, cues: [], rawText: '' }
+        : await loadSubtitleTrack(file);
       disableEmbeddedTextTracks();
+      if (nativeSubtitlePath && videoSource?.kind === 'mpv') {
+        await loadNativeExternalSubtitle(
+          nativeSubtitlePath,
+          nativeOnlySubtitle ? 'native' : 'overlay',
+          isCurrentSelection,
+        );
+      }
+      if (!isCurrentSelection()) {
+        return;
+      }
       setSubtitleTrack(nextTrack);
       setActiveEmbeddedTrackId(null);
-      setPanelTab('style');
-      setPanelVisible(true);
+      if (!options?.automatic) {
+        setPanelTab('style');
+        setPanelVisible(true);
+      }
       setNotice(messages.notices.subtitleLoaded(nextTrack.fileName));
     } catch (error) {
-      setNotice(getSubtitleErrorMessage(error, messages));
+      if (isCurrentSelection()) {
+        setNotice(getSubtitleErrorMessage(error, messages));
+      }
     } finally {
-      setSubtitleLoading(false);
+      if (isCurrentSelection()) {
+        setSubtitleLoading(false);
+      }
+    }
+  }
+
+  async function autoLoadMatchingSubtitle(videoPath: string): Promise<void> {
+    if (!isDesktopApp()) {
+      return;
+    }
+
+    if (
+      autoMatchedSubtitlePathRef.current &&
+      areFilePathsEqual(autoMatchedSubtitlePathRef.current, videoPath)
+    ) {
+      return;
+    }
+
+    autoMatchedSubtitlePathRef.current = videoPath;
+    const lookupSelectionRevision = subtitleSelectionRevisionRef.current;
+
+    let matchingSubtitlePath: string | null;
+    try {
+      matchingSubtitlePath = await invoke<string | null>(
+        'find_matching_external_subtitle',
+        { path: videoPath },
+      );
+    } catch (error) {
+      console.warn('[Noir subtitles] exact-basename lookup failed', error);
+      return;
+    }
+
+    if (
+      !matchingSubtitlePath ||
+      !areFilePathsEqual(currentVideoPathRef.current, videoPath) ||
+      subtitleSelectionRevisionRef.current !== lookupSelectionRevision
+    ) {
+      return;
+    }
+
+    try {
+      const matchingSubtitleFile = await fileFromPath(matchingSubtitlePath);
+      if (
+        !areFilePathsEqual(currentVideoPathRef.current, videoPath) ||
+        subtitleSelectionRevisionRef.current !== lookupSelectionRevision
+      ) {
+        return;
+      }
+      await handleSubtitleSelection(
+        [matchingSubtitleFile],
+        matchingSubtitlePath,
+        { automatic: true, expectedVideoPath: videoPath },
+      );
+    } catch (error) {
+      console.warn('[Noir subtitles] exact-basename subtitle load failed', error);
     }
   }
 
@@ -2891,7 +3317,7 @@ export default function App() {
         }
 
         const subtitleFile = await fileFromPath(path);
-        await handleSubtitleSelection([subtitleFile]);
+        await handleSubtitleSelection([subtitleFile], path);
         return;
       }
 
@@ -2936,8 +3362,47 @@ export default function App() {
     });
   }
 
-  function clearSubtitleTrack() {
+  async function playPlaylistById(id: string): Promise<void> {
+    const playlistIndex = playlistVideos.findIndex(
+      (playlistVideo, index) =>
+        `playlist-${index}-${playlistVideo.fileName}` === id,
+    );
+    if (playlistIndex >= 0) {
+      await playPlaylistVideo(playlistVideos[playlistIndex]);
+    }
+  }
+
+  async function playAdjacentPlaylistVideo(
+    direction: 'next' | 'previous',
+  ): Promise<void> {
+    const currentIndex = activePlaylistIndex;
+    const nextIndex = direction === 'next' ? currentIndex + 1 : currentIndex - 1;
+    const nextVideo = currentIndex >= 0 ? playlistVideos[nextIndex] : undefined;
+    if (nextVideo) {
+      await playPlaylistVideo(nextVideo);
+    }
+  }
+
+  async function openSubtitleFromPath(path: string): Promise<void> {
+    await handleSubtitleSelection([await fileFromPath(path)], path);
+  }
+
+  async function selectEmbeddedSubtitleById(id: string): Promise<void> {
+    const trackOption = nativeSubtitleTracks.find((track) => track.id === id);
+    if (trackOption) {
+      await selectEmbeddedSubtitleTrack(trackOption);
+    }
+  }
+
+  async function clearSubtitleTrack() {
+    subtitleSelectionRevisionRef.current += 1;
     disableEmbeddedTextTracks();
+    if (isNativeMpvSource) {
+      await clearNativeSubtitleTracks();
+      await setMpvProperty('sub-delay', 0).catch(() => undefined);
+      nativeExternalSubtitlePathRef.current = null;
+      nativeSubtitleDisplayModeRef.current = null;
+    }
     setSubtitleTrack(null);
     setActiveEmbeddedTrackId(null);
     setActiveCueIndex(-1);
@@ -3117,7 +3582,15 @@ export default function App() {
   }
 
   function updateSyncOffset(nextValue: number) {
-    setSyncOffsetMs(clamp(nextValue, -MAX_SYNC_OFFSET_MS, MAX_SYNC_OFFSET_MS));
+    const nextOffset = clamp(nextValue, -MAX_SYNC_OFFSET_MS, MAX_SYNC_OFFSET_MS);
+    setSyncOffsetMs(nextOffset);
+    if (
+      isNativeMpvSource &&
+      nativeSubtitleDisplayModeRef.current === 'native' &&
+      nativeExternalSubtitlePathRef.current
+    ) {
+      void setMpvProperty('sub-delay', nextOffset / 1000).catch(() => undefined);
+    }
   }
 
   function shiftSyncOffset(deltaMs: number) {
@@ -3279,11 +3752,11 @@ export default function App() {
       externalAudioElement.pause();
       externalAudioElement.removeAttribute('src');
       externalAudioElement.load();
-      setVideoInternalAudioMuted(false);
+      setVideoInternalAudioMutedEvent(false);
       return;
     }
 
-    setVideoInternalAudioMuted(true);
+    setVideoInternalAudioMutedEvent(true);
     externalAudioElement.pause();
     externalAudioElement.src = externalAudioSource;
     externalAudioElement.preload = 'auto';
@@ -3367,7 +3840,11 @@ export default function App() {
       videoElement.removeEventListener('volumechange', handleVolumeChange);
       externalAudioElement.removeEventListener('loadedmetadata', handleLoadedMetadata);
     };
-  }, [externalAudioSource, videoSource?.src]);
+  }, [
+    externalAudioSource,
+    setVideoInternalAudioMutedEvent,
+    videoSource?.src,
+  ]);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -3514,14 +3991,19 @@ export default function App() {
       return;
     }
 
-    refreshEmbeddedSubtitleTracks();
+    refreshEmbeddedSubtitleTracksEvent();
     if (videoSource.path && videoSource.kind !== 'mpv') {
       void refreshMediaSubtitleTracks(videoSource.path);
       if (videoSource.kind !== 'hls') {
-        void refreshAudioTracks(videoSource.path);
+        void refreshAudioTracksEvent(videoSource.path);
       }
     }
-  }, [language, videoSource]);
+  }, [
+    language,
+    refreshAudioTracksEvent,
+    refreshEmbeddedSubtitleTracksEvent,
+    videoSource,
+  ]);
 
   useEffect(() => {
     if (
@@ -3547,8 +4029,13 @@ export default function App() {
     }
 
     autoPreparedAudioKeyRef.current = fallbackKey;
-    void selectAudioTrack(firstTrack, videoSource.path);
-  }, [externalAudioSource, nativeAudioTracks, videoSource]);
+    void selectAudioTrackEvent(firstTrack, videoSource.path);
+  }, [
+    externalAudioSource,
+    nativeAudioTracks,
+    selectAudioTrackEvent,
+    videoSource,
+  ]);
 
   useEffect(() => {
     if (
@@ -3568,27 +4055,27 @@ export default function App() {
           return;
         }
 
-        await prepareAudioTrack(trackOption, videoSource.path);
+        await prepareAudioTrackEvent(trackOption, videoSource.path);
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [nativeAudioTracks, videoSource]);
+  }, [nativeAudioTracks, prepareAudioTrackEvent, videoSource]);
 
   useEffect(() => {
     if (!fontStylesheetUrl) {
       return;
     }
 
-    void loadRemoteFontStylesheet(fontStylesheetUrl, {
+    void loadRemoteFontStylesheetEvent(fontStylesheetUrl, {
       quiet: true,
       selectFirstFamily: false,
     }).catch(() => {
       // Ignore startup font load failures and keep local fallbacks.
     });
-  }, []);
+  }, [fontStylesheetUrl, loadRemoteFontStylesheetEvent]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3624,7 +4111,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [videoSource?.path]);
+  }, [playlistRefreshRevision, videoSource?.path]);
 
   useEffect(() => {
     let unlistenPromise: Promise<UnlistenFn> | undefined;
@@ -3634,7 +4121,7 @@ export default function App() {
       try {
         const initialPath = await invoke<string | null>('get_launch_video');
         if (active && initialPath) {
-          void openVideoFromPath(initialPath);
+          void openVideoFromPathEvent(initialPath);
         }
       } catch {
         // Browser preview is fine without the desktop bridge.
@@ -3642,7 +4129,7 @@ export default function App() {
 
       try {
         unlistenPromise = listen<OpenFilePayload>('open-file', (event) => {
-          void openVideoFromPath(event.payload.path);
+            void openVideoFromPathEvent(event.payload.path);
         }).catch(() => () => undefined);
       } catch {
         // Ignore when running in a plain browser.
@@ -3658,6 +4145,7 @@ export default function App() {
   }, [
     autoplayOnOpen,
     messages,
+    openVideoFromPathEvent,
     rememberSyncOffset,
     shouldOpenPanelOnVideoReady,
   ]);
@@ -3685,10 +4173,25 @@ export default function App() {
             pending.position = null;
             pending.rate = null;
             pending.paused = null;
-            void openVideoFromPath(command.path, {
-              playOnReady: false,
-              applyOpenPreferences: false,
-            });
+            void pluginRuntime.commands.execute('media.open', { path: command.path });
+            return;
+          }
+
+          if (command.command === 'subtitle') {
+            if (!command.path) {
+              return;
+            }
+
+            void pluginRuntime.commands
+              .execute('subtitle.open', { path: command.path })
+              .catch(() => undefined);
+            return;
+          }
+
+          if (command.command === 'mute') {
+            void pluginRuntime.commands
+              .execute('media.setMuted', { muted: command.muted ?? true })
+              .catch(() => undefined);
             return;
           }
 
@@ -3697,11 +4200,17 @@ export default function App() {
               typeof command.position === 'number' &&
               Number.isFinite(command.position)
             ) {
-              pending.position = Math.max(0, command.position);
-              if (videoSource?.kind === 'mpv') {
-                void applyPendingSyncplayStateToMpv(videoSource.path);
-              } else if (videoElementRef.current) {
-                applyPendingSyncplayState(videoElementRef.current, videoSource?.path);
+              const position = Math.max(0, command.position);
+              pending.position = position;
+              const canApplyImmediately = Boolean(
+                videoSource &&
+                (!pending.openPath || areFilePathsEqual(pending.openPath, videoSource.path)),
+              );
+              if (canApplyImmediately) {
+                pending.position = null;
+                void pluginRuntime.commands.execute('media.seekTo', { seconds: position }).catch(() => {
+                  pending.position = position;
+                });
               }
             }
             return;
@@ -3709,26 +4218,44 @@ export default function App() {
 
           if (command.command === 'rate') {
             if (typeof command.rate === 'number' && Number.isFinite(command.rate)) {
-              pending.rate = command.rate;
-              if (videoSource?.kind === 'mpv') {
-                void applyPendingSyncplayStateToMpv(videoSource.path);
-              } else if (videoElementRef.current) {
-                applyPendingSyncplayState(videoElementRef.current, videoSource?.path);
+              const rate = clamp(command.rate, 0.25, 4);
+              pending.rate = rate;
+              const canApplyImmediately = Boolean(
+                videoSource &&
+                (!pending.openPath || areFilePathsEqual(pending.openPath, videoSource.path)),
+              );
+              if (canApplyImmediately) {
+                pending.rate = null;
+                void pluginRuntime.commands.execute('media.setRate', { rate }).catch(() => {
+                  pending.rate = rate;
+                });
               }
             }
             return;
           }
 
           if (command.command === 'play' || command.command === 'pause') {
-            pending.paused = command.command === 'pause';
-            if (videoSource?.kind === 'mpv') {
-              void applyPendingSyncplayStateToMpv(videoSource.path);
-            } else if (videoElementRef.current) {
-              applyPendingSyncplayState(videoElementRef.current, videoSource?.path);
+            const paused = command.command === 'pause';
+            pending.paused = paused;
+            const canApplyImmediately = Boolean(
+              videoSource &&
+              (!pending.openPath || areFilePathsEqual(pending.openPath, videoSource.path)),
+            );
+            if (canApplyImmediately) {
+              pending.paused = null;
+              void pluginRuntime.commands.execute(paused ? 'media.pause' : 'media.play', undefined).catch(() => {
+                pending.paused = paused;
+              });
             }
           }
         });
-      } catch {
+      } catch (error) {
+        if (getNativeBridge().isDesktop) {
+          console.error(
+            '[Noir Syncplay] unable to subscribe to commands',
+            error instanceof Error ? error.name : 'unknown error',
+          );
+        }
         // Browser preview is fine without the desktop bridge.
       }
     }
@@ -3739,7 +4266,13 @@ export default function App() {
       active = false;
       unlisten?.();
     };
-  }, [messages, rememberSyncOffset, shouldOpenPanelOnVideoReady, videoSource?.path]);
+  }, [
+    messages,
+    pluginRuntime,
+    rememberSyncOffset,
+    shouldOpenPanelOnVideoReady,
+    videoSource,
+  ]);
 
   useEffect(() => {
     const reportStatus = () => {
@@ -3792,17 +4325,18 @@ export default function App() {
   }, [
     isNativeMpvSource,
     mpvFileLoadedTick,
+    videoSource,
     videoSource?.fileName,
     videoSource?.path,
     videoSource?.src,
   ]);
 
   useEffect(() => {
-    let unlistenNativeDrop: UnlistenFn | undefined;
+    let unlistenNativeDrop: NativeUnsubscribe | undefined;
 
     async function wireNativeDrop() {
       try {
-        unlistenNativeDrop = await getCurrentWebview().onDragDropEvent(
+        unlistenNativeDrop = await getNativeBridge().onDragDrop(
           (event) => {
             const { payload } = event;
 
@@ -3832,7 +4366,7 @@ export default function App() {
             setDropOverlayMessage(getDropOverlayMessage(messages, 'video.mp4'));
             const [path] = payload.paths;
             if (path) {
-              void handleDroppedPath(path);
+              void handleDroppedPathEvent(path);
             }
           },
         );
@@ -3846,7 +4380,13 @@ export default function App() {
     return () => {
       void unlistenNativeDrop?.();
     };
-  }, [messages, videoSource, subtitleTrack, syncOffsetMs]);
+  }, [
+    handleDroppedPathEvent,
+    messages,
+    subtitleTrack,
+    syncOffsetMs,
+    videoSource,
+  ]);
 
   useEffect(() => {
     function handleInspectorShortcut(event: KeyboardEvent) {
@@ -3860,14 +4400,14 @@ export default function App() {
       }
 
       event.preventDefault();
-      void openInspector();
+      void openInspectorEvent();
     }
 
     window.addEventListener('keydown', handleInspectorShortcut);
     return () => {
       window.removeEventListener('keydown', handleInspectorShortcut);
     };
-  }, [messages]);
+  }, [messages, openInspectorEvent]);
 
   useEffect(() => {
     const videoElement = videoElementRef.current;
@@ -3875,39 +4415,44 @@ export default function App() {
       return;
     }
 
-    if (playerRef.current) {
-      return;
-    }
+    let active = true;
 
-    playerRef.current = new Plyr(videoElement, {
-      controls: [
-        'play-large',
-        'play',
-        'progress',
-        'current-time',
-        'duration',
-        'mute',
-        'volume',
-        'fullscreen',
-      ],
-      settings: [],
-      keyboard: {
-        focused: true,
-        global: true,
-      },
-      fullscreen: {
-        enabled: true,
-        fallback: true,
-        iosNative: false,
-        container: '.player-frame',
-      },
+    void loadBrowserPlaybackLibraries().then(({ Plyr }) => {
+      if (!active || playerRef.current) {
+        return;
+      }
+
+      playerRef.current = new Plyr(videoElement, {
+        controls: [
+          'play-large',
+          'play',
+          'progress',
+          'current-time',
+          'duration',
+          'mute',
+          'volume',
+          'fullscreen',
+        ],
+        settings: [],
+        keyboard: {
+          focused: true,
+          global: true,
+        },
+        fullscreen: {
+          enabled: true,
+          fallback: true,
+          iosNative: false,
+          container: '.player-frame',
+        },
+      });
     });
 
     return () => {
+      active = false;
       playerRef.current?.destroy();
       playerRef.current = null;
     };
-  }, [videoSource?.kind]);
+  }, [videoSource?.kind, videoSource]);
 
   useEffect(() => {
     const videoElement = videoElementRef.current;
@@ -3915,6 +4460,7 @@ export default function App() {
       return;
     }
 
+    let active = true;
     hlsRef.current?.destroy();
     hlsRef.current = null;
     videoElement.autoplay = playOnReadyRef.current;
@@ -3924,57 +4470,71 @@ export default function App() {
         videoElement.src = videoSource.src;
       }
       videoElement.load();
-      return;
+      return () => {
+        active = false;
+      };
     }
 
     videoElement.removeAttribute('src');
     videoElement.load();
 
-    if (Hls.isSupported()) {
-      const hls = new Hls({
-        backBufferLength: 20,
-        maxBufferLength: 40,
-        maxMaxBufferLength: 70,
-        startFragPrefetch: true,
-      });
-      hlsRef.current = hls;
-      hls.attachMedia(videoElement);
-      hls.on(Hls.Events.MEDIA_ATTACHED, () => {
-        hls.loadSource(videoSource.src);
-      });
-      hls.on(Hls.Events.ERROR, (_event, data) => {
-        if (!data.fatal) {
+    void loadBrowserPlaybackLibraries()
+      .then(({ Hls }) => {
+        if (!active) {
           return;
         }
 
-        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-          hls.startLoad();
+        if (Hls.isSupported()) {
+          const hls = new Hls({
+            backBufferLength: 20,
+            maxBufferLength: 40,
+            maxMaxBufferLength: 70,
+            startFragPrefetch: true,
+          });
+          hlsRef.current = hls;
+          hls.attachMedia(videoElement);
+          hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+            hls.loadSource(videoSource.src);
+          });
+          hls.on(Hls.Events.ERROR, (_event, data) => {
+            if (!data.fatal) {
+              return;
+            }
+
+            if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              hls.startLoad();
+              return;
+            }
+
+            if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+              hls.recoverMediaError();
+              return;
+            }
+
+            setNotice(messages.notices.hlsPlaybackFailed);
+          });
           return;
         }
 
-        if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-          hls.recoverMediaError();
+        if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
+          videoElement.src = videoSource.src;
+          videoElement.load();
           return;
         }
 
         setNotice(messages.notices.hlsPlaybackFailed);
+      })
+      .catch(() => {
+        if (active) {
+          setNotice(messages.notices.hlsPlaybackFailed);
+        }
       });
 
-      return () => {
-        hls.destroy();
-        if (hlsRef.current === hls) {
-          hlsRef.current = null;
-        }
-      };
-    }
-
-    if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
-      videoElement.src = videoSource.src;
-      videoElement.load();
-      return;
-    }
-
-    setNotice(messages.notices.hlsPlaybackFailed);
+    return () => {
+      active = false;
+      hlsRef.current?.destroy();
+      hlsRef.current = null;
+    };
   }, [messages, videoSource]);
 
   useEffect(() => {
@@ -4044,7 +4604,7 @@ export default function App() {
     const retryTimers: number[] = [];
 
     const tick = () => {
-      updateSubtitleCue();
+      updateSubtitleCueEvent();
       if (!videoElement.paused && !videoElement.ended) {
         animationFrame = window.requestAnimationFrame(tick);
       }
@@ -4057,7 +4617,7 @@ export default function App() {
 
     const stopLoop = () => {
       window.cancelAnimationFrame(animationFrame);
-      updateSubtitleCue();
+      updateSubtitleCueEvent();
     };
 
     const handleEnded = () => {
@@ -4084,12 +4644,12 @@ export default function App() {
         return;
       }
 
-      void openVideoFromPath(nextPlaylistVideo.path, {
+      void openVideoFromPathEvent(nextPlaylistVideo.path, {
         panelTab,
         panelVisible,
         playOnReady: true,
         applyOpenPreferences: false,
-        preservePlaybackState: capturePlaybackState(),
+        preservePlaybackState: capturePlaybackStateEvent(),
       });
     };
 
@@ -4135,16 +4695,17 @@ export default function App() {
           : shouldForcePlayOnReady || (shouldApplyOpenPreferences && autoplayOnOpen);
       playOnReadyRef.current = false;
 
-      refreshEmbeddedSubtitleTracks();
+      refreshEmbeddedSubtitleTracksEvent();
       if (videoSource?.path) {
         void refreshMediaSubtitleTracks(videoSource.path);
         if (videoSource.kind !== 'hls') {
-          void refreshAudioTracks(videoSource.path);
+          void refreshAudioTracksEvent(videoSource.path);
         }
+        void autoLoadMatchingSubtitleEvent(videoSource.path);
       }
       retryTimers.push(
-        window.setTimeout(refreshEmbeddedSubtitleTracks, 180),
-        window.setTimeout(refreshEmbeddedSubtitleTracks, 750),
+        window.setTimeout(refreshEmbeddedSubtitleTracksEvent, 180),
+        window.setTimeout(refreshEmbeddedSubtitleTracksEvent, 750),
       );
       setNotice((currentNotice) => {
         if (!videoSource) {
@@ -4176,18 +4737,18 @@ export default function App() {
         }, 60);
       }
 
-      updateSubtitleCue();
+      updateSubtitleCueEvent();
     };
 
     videoElement.addEventListener('loadedmetadata', handleLoadedMetadata);
     videoElement.addEventListener('play', startLoop);
     videoElement.addEventListener('pause', stopLoop);
-    videoElement.addEventListener('seeked', updateSubtitleCue);
-    videoElement.addEventListener('timeupdate', updateSubtitleCue);
+    videoElement.addEventListener('seeked', updateSubtitleCueEvent);
+    videoElement.addEventListener('timeupdate', updateSubtitleCueEvent);
     videoElement.addEventListener('ended', handleEnded);
     videoElement.addEventListener('volumechange', handleVolumeChange);
 
-    updateSubtitleCue();
+    updateSubtitleCueEvent();
     if (!videoElement.paused) {
       startLoop();
     }
@@ -4198,25 +4759,130 @@ export default function App() {
       videoElement.removeEventListener('loadedmetadata', handleLoadedMetadata);
       videoElement.removeEventListener('play', startLoop);
       videoElement.removeEventListener('pause', stopLoop);
-      videoElement.removeEventListener('seeked', updateSubtitleCue);
-      videoElement.removeEventListener('timeupdate', updateSubtitleCue);
+      videoElement.removeEventListener('seeked', updateSubtitleCueEvent);
+      videoElement.removeEventListener('timeupdate', updateSubtitleCueEvent);
       videoElement.removeEventListener('ended', handleEnded);
       videoElement.removeEventListener('volumechange', handleVolumeChange);
     };
   }, [
     autoplayOnOpen,
+    autoLoadMatchingSubtitleEvent,
+    capturePlaybackStateEvent,
     endPlaybackAction,
     fullscreenOnOpen,
     messages,
     panelTab,
     panelVisible,
     playlistVideos,
+    openVideoFromPathEvent,
     promptForSubtitles,
+    refreshAudioTracksEvent,
+    refreshEmbeddedSubtitleTracksEvent,
     shouldOpenPanelOnVideoReady,
     subtitleTrack,
     syncOffsetMs,
+    updateSubtitleCueEvent,
     videoSource,
   ]);
+
+  useAppPluginBridge({
+    runtime: pluginRuntime,
+    source: videoSource,
+    nativeStatus: mpvStatus,
+    nativePaused: mpvPaused,
+    nativeTime: mpvTimePos,
+    nativeDuration: mpvDuration,
+    nativeVolume: mpvVolume,
+    nativeMuted: mpvMuted,
+    nativeRate: mpvPlaybackRate,
+    nativeWidth: mpvVideoWidth,
+    nativeHeight: mpvVideoHeight,
+    nativeSurfaceReady: nativeVideoSurfaceReady,
+    nativeFullscreen,
+    isNative: isNativeMpvSource,
+    subtitleTrack: subtitleTrack ? { fileName: subtitleTrack.fileName } : null,
+    activeCueIndex,
+    activeCueText: activeCue?.html.replace(/<[^>]*>/g, '') ?? null,
+    syncOffsetMs,
+    playlist: playlistVideos,
+    activePlaylistIndex,
+    panelVisible,
+    panelTab,
+    controlsVisible: playbackControlsVisible,
+    videoElement: videoElementRef.current,
+    actions: {
+      open: (path) =>
+        openVideoFromPath(path, {
+          playOnReady: false,
+          applyOpenPreferences: false,
+        }),
+      retryWithFallback: async () => {
+        mpvFallbackPathRef.current = null;
+        await retryNativePlaybackWithBrowser();
+      },
+      play: async () => {
+        if (isNativeMpvSource) {
+          await setMpvProperty('pause', false);
+        } else {
+          await videoElementRef.current?.play();
+        }
+      },
+      pause: async () => {
+        if (isNativeMpvSource) {
+          await setMpvProperty('pause', true);
+        } else {
+          videoElementRef.current?.pause();
+        }
+      },
+      toggle: () => togglePlayback(),
+      seekTo: async (seconds) => {
+        if (isNativeMpvSource) {
+          await mpvCommand('seek', [Math.max(0, seconds), 'absolute', 'exact']);
+        } else if (videoElementRef.current) {
+          videoElementRef.current.currentTime = Math.max(0, seconds);
+        }
+      },
+      seekBy: async (seconds) => seekPlaybackBy(seconds),
+      setRate: async (rate) => {
+        if (isNativeMpvSource) {
+          await setMpvProperty('speed', rate);
+        } else if (videoElementRef.current) {
+          videoElementRef.current.playbackRate = rate;
+        }
+      },
+      setVolume: async (volume) => {
+        storeVolume(volume);
+        if (isNativeMpvSource) {
+          await setMpvProperty('volume', volume * 100);
+        } else if (videoElementRef.current) {
+          videoElementRef.current.volume = volume;
+        }
+      },
+      setMuted: async (muted) => {
+        if (isNativeMpvSource) {
+          await setMpvProperty('mute', muted);
+        } else if (videoElementRef.current) {
+          videoElementRef.current.muted = muted;
+        }
+      },
+      toggleFullscreen: () => togglePlayerFullscreen(),
+      openSubtitle: (path) => openSubtitleFromPath(path),
+      selectEmbeddedSubtitle: (id) => selectEmbeddedSubtitleById(id),
+      clearSubtitle: () => clearSubtitleTrack(),
+      setSubtitleOffset: (offsetMs) => updateSyncOffset(offsetMs),
+      exportSubtitle: () => downloadCurrentSubtitle(),
+      refreshPlaylist: () => setPlaylistRefreshRevision((revision) => revision + 1),
+      playPlaylist: (id) => playPlaylistById(id),
+      playlistNext: () => playAdjacentPlaylistVideo('next'),
+      playlistPrevious: () => playAdjacentPlaylistVideo('previous'),
+      openPanel: (tab) => {
+        setPanelVisible(true);
+        if (tab === 'load' || tab === 'playlist' || tab === 'style') setPanelTab(tab);
+      },
+      closePanel: () => setPanelVisible(false),
+      showNotice: (message) => setNotice(message),
+    },
+  });
 
   if (!desktopWindowReady) {
     return (
@@ -4301,7 +4967,9 @@ export default function App() {
         accept={SUBTITLE_ACCEPT}
         onChange={(event) => {
           if (event.target.files?.length) {
-            void handleSubtitleSelection(event.target.files);
+            const [file] = Array.from(event.target.files);
+            const nativePath = (file as File & { path?: string } | undefined)?.path;
+            void handleSubtitleSelection(event.target.files, nativePath);
           }
         }}
       />
@@ -4352,8 +5020,23 @@ export default function App() {
           <button type='button' className='ghost-button' onClick={() => void openInspector()}>
             {messages.header.inspect}
           </button>
+          <button
+            type='button'
+            className='ghost-button'
+            onClick={() => setPluginManagerVisible(true)}
+          >
+            {PLUGIN_MANAGER_MESSAGES[language].title}
+          </button>
+          <PluginSlot name='app.header.actions' className='plugin-slot-inline' />
         </div>
       </header>
+
+      {pluginManagerVisible ? (
+        <PluginManagerPanel
+          locale={language}
+          onClose={() => setPluginManagerVisible(false)}
+        />
+      ) : null}
 
       <main className='app-main'>
         {!videoSource ? (
@@ -4373,6 +5056,7 @@ export default function App() {
               <button type='button' className='ghost-button' onClick={() => void openInspector()}>
                 {messages.hero.openDevtools}
               </button>
+              <PluginSlot name='app.hero.actions' className='plugin-slot-inline' />
             </div>
 
             <div
@@ -4445,6 +5129,7 @@ export default function App() {
                 <span className='info-chip'>
                   {messages.stage.offset}: {formatMillisecondsAsSeconds(syncOffsetMs)}
                 </span>
+                <PluginSlot name='stage.info' className='plugin-slot-inline' />
               </div>
               <div className='stage-actions'>
                 <button
@@ -4474,6 +5159,7 @@ export default function App() {
                 >
                   {messages.stage.playlist}
                 </button>
+                <PluginSlot name='stage.actions' className='plugin-slot-inline' />
               </div>
             </div>
 
@@ -4497,15 +5183,26 @@ export default function App() {
                 onPointerLeave={() => schedulePlaybackControlsHide(1800)}
                 onFocusCapture={revealPlaybackControls}
               >
-                {isNativeMpvSource ? null : (
-                  <video
-                    ref={videoElementRef}
-                    className='player-video'
-                    src={videoSource.kind === 'hls' ? undefined : videoSource.src}
-                    preload='auto'
-                    playsInline
-                  />
-                )}
+                <PluginSlot name='player.before-media' className='plugin-slot-layer' />
+                <video
+                  ref={videoElementRef}
+                  className={`player-video ${isNativeMpvSource ? 'player-video-native-hidden' : ''}`}
+                  aria-hidden={isNativeMpvSource}
+                  tabIndex={isNativeMpvSource ? -1 : undefined}
+                  src={
+                    isNativeMpvSource || videoSource.kind === 'hls'
+                      ? undefined
+                      : videoSource.src
+                  }
+                  preload='auto'
+                  playsInline
+                />
+                {!isNativeMpvSource ? (
+                  <div className='browser-plugin-controls' data-player-control>
+                    <PluginSlot name='player.controls.left' className='plugin-slot-inline' />
+                    <PluginSlot name='player.controls.right' className='plugin-slot-inline' />
+                  </div>
+                ) : null}
                 <audio ref={externalAudioRef} className='hidden-audio' preload='auto' />
 
                 {isNativeMpvSource ? (
@@ -4538,6 +5235,8 @@ export default function App() {
                   </div>
                 ) : null}
 
+                <PluginSlot name='player.overlay' className='plugin-slot-overlay' />
+
                 {isNativeMpvSource ? (
                   <div
                     className='native-control-bar'
@@ -4546,6 +5245,7 @@ export default function App() {
                     onDoubleClick={handleNativeControlBarDoubleClick}
                     onPointerDown={(event) => event.stopPropagation()}
                   >
+                    <PluginSlot name='player.controls.left' className='plugin-slot-inline' />
                     <button
                       type='button'
                       className='native-control-button'
@@ -4632,6 +5332,7 @@ export default function App() {
                         <Maximize2 size={20} strokeWidth={2.2} aria-hidden='true' />
                       )}
                     </button>
+                    <PluginSlot name='player.controls.right' className='plugin-slot-inline' />
                   </div>
                 ) : null}
 
@@ -4699,6 +5400,7 @@ export default function App() {
                     >
                       {messages.dock.devTools}
                     </button>
+                    <PluginSlot name='player.dock' className='plugin-slot-inline' />
                   </div>
                 </div>
 
@@ -4737,7 +5439,10 @@ export default function App() {
                     >
                       {messages.panel.close}
                     </button>
+                    <PluginSlot name='panel.tabs' className='plugin-slot-inline' />
                   </div>
+
+                  <PluginSlot name='panel.content' className='plugin-slot-panel-content' />
 
                   {panelTab === 'load' ? (
                     <div className='panel-body load-zone'>
@@ -4964,6 +5669,7 @@ export default function App() {
                     </div>
                   ) : (
                     <div className='panel-body settings-container'>
+                      <PluginSlot name='settings.sections' className='plugin-slot-settings' />
                       <section className='settings-section'>
                         <div className='section-heading'>
                           <h3>{messages.behavior.title}</h3>
@@ -5846,6 +6552,8 @@ export default function App() {
           {toast.message}
         </div>
       ) : null}
+
+      <PluginSlot name='notifications' className='plugin-slot-notifications' />
 
       {fullscreenTransitionPhase !== 'idle' && isDesktopApp() ? (
         <div

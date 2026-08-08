@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "target": "windows-x86_64",
+  "generatedOn": "2026-08-07",
+  "artifacts": [
+    {
+      "path": "src-tauri/lib/libmpv-2.dll",
+      "sha256": "2F94499979A213321C7E80E7BD597313CB4F5A381095B2C7D47DC1D27684B3E3",
+      "source": "tauri-plugin-libmpv-api setup-lib",
+      "version": "mpv-dev-lgpl-x86_64-20260807-git-dd5d17d328"
+    },
+    {
+      "path": "src-tauri/lib/libmpv-wrapper.dll",
+      "sha256": "0D5ADEAD5F175C55E0790A80924EC0A2636F72E3675C79A6D9D9568B2ED2384A",
+      "source": "tauri-plugin-libmpv-api setup-lib",
+      "version": "libmpv-wrapper-windows-x86_64"
+    },
+    {
+      "path": "src-tauri/resources/bin/ffmpeg.exe",
+      "sha256": "74DB6C184A03DBA2BDFE23E1A1F41CF5A8385BC1DE6A7A1B26DB1DC541ABEF93",
+      "source": "FFmpeg full_build-www.gyan.dev",
+      "version": "8.0.1"
+    },
+    {
+      "path": "src-tauri/resources/bin/ffprobe.exe",
+      "sha256": "55BB6C6289367AE2383EFA86B26BF2596F8ADB72AC747360EB13DF162354161C",
+      "source": "FFmpeg full_build-www.gyan.dev",
+      "version": "8.0.1"
+    }
+  ]
+}

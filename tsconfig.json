@@ -17,13 +17,22 @@
     "jsx": "react-jsx",
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@noir-player/plugin-api": ["./packages/plugin-api/src/index.ts"],
+      "@noir-player/plugin-test-utils": ["./packages/plugin-test-utils/src/index.ts"],
+      "@noir-player/plugin-playback-stats": ["./packages/plugin-playback-stats/src/index.tsx"],
+      "@noir-player/plugin-mpv-lab": ["./packages/plugin-mpv-lab/src/index.ts"]
     }
   },
   "include": [
     "src/**/*.ts",
     "src/**/*.tsx",
-    "src/vite-env.d.ts"
+    "src/vite-env.d.ts",
+    "packages/**/*.ts",
+    "packages/**/*.tsx",
+    "noir.plugins.config.ts",
+    "tests/**/*.ts",
+    "tests/**/*.tsx"
   ],
   "exclude": ["dist", "node_modules", "src-tauri"]
 }
