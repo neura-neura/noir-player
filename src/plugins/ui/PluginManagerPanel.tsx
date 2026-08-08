@@ -1,17 +1,20 @@
 import { useEffect, useMemo, useState } from 'react';
+import type { FormEvent } from 'react';
 import type {
   PluginCapability,
   PluginRuntimeStatus,
   PluginRiskAcknowledgement,
 } from '@noir-player/plugin-api';
 import {
-  installGitHubPlugin,
+  discoverGitHubPluginRepository,
+  installGitHubPluginCandidate,
   readPluginCatalog,
   removeGitHubPlugin,
   removePluginEnabledOverride,
   setPluginEnabledOverride,
   updateGitHubPluginEnabled,
   updateGitHubPluginPermissions,
+  type GitHubPluginRepository,
   type InstalledGitHubPlugin,
   type PluginCatalogDocument,
 } from '@/plugins/catalog';
@@ -39,7 +42,10 @@ export function PluginManagerPanel({ locale, onClose }: PluginManagerPanelProps)
   const [catalog, setCatalog] = useState<PluginCatalogDocument>(() => readPluginCatalog());
   const [runtimeRevision, setRuntimeRevision] = useState(0);
   const [repositoryUrl, setRepositoryUrl] = useState('');
+  const [repository, setRepository] = useState<GitHubPluginRepository | null>(null);
+  const [selectedPluginIds, setSelectedPluginIds] = useState<Set<string>>(() => new Set());
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [discovering, setDiscovering] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [feedback, setFeedback] = useState('');
   const [restartNeeded, setRestartNeeded] = useState(false);
@@ -167,19 +173,85 @@ export function PluginManagerPanel({ locale, onClose }: PluginManagerPanelProps)
     setFeedback(messages.restart);
   }
 
-  async function submitRepository(event: React.FormEvent<HTMLFormElement>): Promise<void> {
+  async function submitRepository(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (!repositoryUrl.trim()) return;
-    setInstalling(true);
+    setDiscovering(true);
     setFeedback('');
     try {
-      const installed = await installGitHubPlugin(repositoryUrl);
-      setCatalog(readPluginCatalog());
-      setRepositoryUrl('');
-      setRestartNeeded(true);
-      setFeedback(messages.installed(installed.manifest.name));
+      const discovered = await discoverGitHubPluginRepository(repositoryUrl);
+      const installedIds = new Set(readPluginCatalog().github.map((plugin) => plugin.id));
+      setRepository(discovered);
+      setSelectedPluginIds(new Set(
+        discovered.plugins
+          .filter((plugin) => !installedIds.has(plugin.id))
+          .map((plugin) => plugin.id),
+      ));
+      setFeedback(messages.repositoryLoaded(discovered.name, discovered.plugins.length));
     } catch (error) {
       setFeedback(messages.failed(error instanceof Error ? error.message : 'unknown error'));
+    } finally {
+      setDiscovering(false);
+    }
+  }
+
+  function toggleDiscoveredPlugin(id: string, selected: boolean): void {
+    setSelectedPluginIds((current) => {
+      const next = new Set(current);
+      if (selected) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
+
+  function selectAllDiscoveredPlugins(): void {
+    if (!repository) return;
+    const installedIds = new Set(catalog.github.map((plugin) => plugin.id));
+    setSelectedPluginIds(new Set(
+      repository.plugins
+        .filter((plugin) => !installedIds.has(plugin.id))
+        .map((plugin) => plugin.id),
+    ));
+  }
+
+  function clearDiscoveredPluginSelection(): void {
+    setSelectedPluginIds(new Set());
+  }
+
+  async function installSelectedPlugins(): Promise<void> {
+    if (!repository) return;
+    const selected = repository.plugins.filter((plugin) => selectedPluginIds.has(plugin.id));
+    if (!selected.length) {
+      setFeedback(messages.noSelection);
+      return;
+    }
+
+    setInstalling(true);
+    setFeedback('');
+    const installedIds: string[] = [];
+    const failures: string[] = [];
+    try {
+      for (const candidate of selected) {
+        try {
+          await installGitHubPluginCandidate(candidate);
+          installedIds.push(candidate.id);
+        } catch (error) {
+          failures.push(error instanceof Error ? error.message : candidate.manifest.name);
+        }
+      }
+
+      setCatalog(readPluginCatalog());
+      setSelectedPluginIds((current) => {
+        const next = new Set(current);
+        installedIds.forEach((id) => next.delete(id));
+        return next;
+      });
+      if (installedIds.length) setRestartNeeded(true);
+      if (failures.length) {
+        setFeedback(messages.partialInstall(installedIds.length, failures[0]));
+      } else {
+        setFeedback(messages.installedMany(installedIds.length));
+      }
     } finally {
       setInstalling(false);
     }
@@ -198,7 +270,7 @@ export function PluginManagerPanel({ locale, onClose }: PluginManagerPanelProps)
       <div className='plugin-manager-body'>
         <section className='plugin-manager-install settings-section'>
           <div className='section-heading'>
-            <h3>{messages.addTitle}</h3>
+            <h3>{messages.repositoryTitle}</h3>
           </div>
           <form className='plugin-manager-install-form' onSubmit={(event) => void submitRepository(event)}>
             <input
@@ -208,16 +280,79 @@ export function PluginManagerPanel({ locale, onClose }: PluginManagerPanelProps)
               onChange={(event) => setRepositoryUrl(event.target.value)}
               placeholder={messages.githubPlaceholder}
               aria-label={messages.githubPlaceholder}
-              disabled={installing}
+              disabled={discovering || installing}
             />
-            <button type='submit' className='primary-button' disabled={installing || !repositoryUrl.trim()}>
-              {installing ? messages.installing : messages.add}
+            <button type='submit' className='primary-button' disabled={discovering || installing || !repositoryUrl.trim()}>
+              {discovering ? messages.discovering : messages.discover}
             </button>
           </form>
-          <p className='helper-text'>{messages.installHelp}</p>
+          <p className='helper-text'>{messages.repositoryHelp}</p>
         </section>
 
-        <div className='plugin-manager-list'>
+        {repository ? (
+          <section className='plugin-manager-repository settings-section'>
+            <div className='section-heading'>
+              <div>
+                <h3>{repository.name}</h3>
+                <a href={repository.repositoryUrl} target='_blank' rel='noreferrer'>{repository.repositoryUrl}</a>
+              </div>
+              <span className='plugin-manager-count'>{messages.catalogPluginCount(repository.plugins.length)}</span>
+            </div>
+            {repository.description ? <p className='helper-text'>{repository.description}</p> : null}
+            <div className='plugin-manager-discovered-list'>
+              {repository.plugins.map((candidate) => {
+                const installed = catalog.github.some((plugin) => plugin.id === candidate.id);
+                const selected = installed || selectedPluginIds.has(candidate.id);
+                return (
+                  <article className={`plugin-manager-card plugin-manager-discovered-card ${installed ? 'is-installed' : ''}`} key={candidate.id}>
+                    <label className='plugin-discovered-select'>
+                      <input
+                        type='checkbox'
+                        checked={selected}
+                        disabled={installed || installing}
+                        onChange={(event) => toggleDiscoveredPlugin(candidate.id, event.target.checked)}
+                      />
+                      <span>
+                        <strong>{candidate.manifest.name}</strong>
+                        <code>{candidate.id}</code>
+                      </span>
+                    </label>
+                    {installed ? <span className='plugin-manager-state is-active'>{messages.installedLabel}</span> : null}
+                    <p>{candidate.manifest.description}</p>
+                    {candidate.manifest.requestedCapabilities.length ? (
+                      <details className='plugin-manager-permissions'>
+                        <summary>{messages.requestedPermissions}</summary>
+                        <ul>{candidate.manifest.requestedCapabilities.map((capability) => <li key={capability}><code>{capability}</code></li>)}</ul>
+                      </details>
+                    ) : null}
+                  </article>
+                );
+              })}
+            </div>
+            <div className='plugin-manager-actions plugin-manager-repository-actions'>
+              <button type='button' className='ghost-button' disabled={installing} onClick={selectAllDiscoveredPlugins}>
+                {messages.selectAll}
+              </button>
+              <button type='button' className='ghost-button' disabled={installing} onClick={clearDiscoveredPluginSelection}>
+                {messages.clearSelection}
+              </button>
+              <button
+                type='button'
+                className='primary-button'
+                disabled={installing || !repository.plugins.some((plugin) => selectedPluginIds.has(plugin.id))}
+                onClick={() => void installSelectedPlugins()}
+              >
+                {installing ? messages.installingSelected : messages.installSelected}
+              </button>
+            </div>
+          </section>
+        ) : null}
+
+        <section className='plugin-manager-installed'>
+          <div className='section-heading'>
+            <h3>{messages.installedTitle}</h3>
+          </div>
+          <div className='plugin-manager-list'>
           {entries.length === 0 ? <p className='helper-text'>{messages.empty}</p> : entries.map((entry) => {
             const enabled = entry.status?.enabled ?? entry.remote?.enabled ?? false;
             const isActive = entry.status?.state === 'active';
@@ -302,7 +437,8 @@ export function PluginManagerPanel({ locale, onClose }: PluginManagerPanelProps)
               </article>
             );
           })}
-        </div>
+          </div>
+        </section>
         {feedback ? <p className='plugin-manager-feedback' role='status'>{feedback}</p> : null}
         {restartNeeded ? <button type='button' className='primary-button plugin-manager-restart' onClick={() => window.location.reload()}>{messages.restart}</button> : null}
       </div>

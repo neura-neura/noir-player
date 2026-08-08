@@ -6,8 +6,27 @@ contract, not a security sandbox.
 
 ## GitHub installation format
 
-The Plugin manager accepts a repository URL when the repository contains a
-`noir.plugin.json` file. The descriptor has this shape:
+The Plugin manager accepts a GitHub repository URL. For a repository with one
+plugin, the legacy `noir.plugin.json` descriptor is still supported. For a
+repository that publishes several plugins, add a root `noir.plugins.json`
+catalog and list one descriptor per plugin:
+
+```json
+{
+  "schemaVersion": 1,
+  "name": "My Noir Player plugins",
+  "description": "Optional repository description.",
+  "plugins": [
+    { "descriptor": "plugins/example/noir.plugin.json" },
+    { "descriptor": "plugins/another/noir.plugin.json" }
+  ]
+}
+```
+
+The manager opens the repository, displays every descriptor, and installs only
+the plugins selected by the user. It keeps the selected entries in the
+installed section, where each one can be enabled, disabled, reviewed, or
+removed. A descriptor has this shape:
 
 ```json
 {

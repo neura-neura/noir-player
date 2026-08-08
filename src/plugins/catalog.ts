@@ -25,6 +25,23 @@ export interface InstalledGitHubPlugin {
   readonly installedAt: number;
 }
 
+export interface GitHubPluginCandidate {
+  readonly id: PluginId;
+  readonly repositoryUrl: string;
+  readonly descriptorUrl: string;
+  readonly entryUrl: string;
+  readonly manifest: NoirPluginManifest;
+  readonly integrity?: string;
+}
+
+export interface GitHubPluginRepository {
+  readonly repositoryUrl: string;
+  readonly catalogUrl: string;
+  readonly name: string;
+  readonly description: string;
+  readonly plugins: readonly GitHubPluginCandidate[];
+}
+
 export interface PluginCatalogDocument {
   readonly schemaVersion: 1;
   readonly enabledOverrides: Readonly<Record<string, boolean>>;
@@ -131,26 +148,80 @@ export function getHighRiskCapabilities(manifest: NoirPluginManifest): readonly 
   return manifest.requestedCapabilities.filter((capability) => HIGH_RISK_CAPABILITIES.has(capability));
 }
 
-export async function installGitHubPlugin(repositoryInput: string): Promise<InstalledGitHubPlugin> {
-  const descriptorInfo = await resolveDescriptor(repositoryInput);
-  const descriptor = await fetchDescriptor(descriptorInfo.descriptorUrl);
-  validateDescriptor(descriptor);
-  const entryUrl = resolveEntryUrl(descriptorInfo.descriptorUrl, descriptor.entry);
-  const entrySource = await fetchText(entryUrl);
-  const integrity = normalizeIntegrity(descriptor.integrity);
-  if (integrity) await assertIntegrity(entrySource, integrity);
+export async function discoverGitHubPluginRepository(
+  repositoryInput: string,
+): Promise<GitHubPluginRepository> {
+  const source = await resolveGitHubSource(repositoryInput);
+  let repositoryName = source.repositoryUrl.split('/').pop() || 'GitHub plugin repository';
+  let repositoryDescription = '';
+  let descriptorUrls: readonly string[] = [];
+
+  if (source.descriptorUrl) {
+    descriptorUrls = [source.descriptorUrl];
+  } else if (source.catalogUrl) {
+    const catalogValue = await fetchJsonOptional<unknown>(source.catalogUrl);
+    if (catalogValue) {
+      const catalog = parseRepositoryCatalog(catalogValue);
+      repositoryName = catalog.name || repositoryName;
+      repositoryDescription = catalog.description;
+      descriptorUrls = catalog.plugins.map((descriptor) =>
+        resolveRepositoryFileUrl(source.catalogUrl!, descriptor),
+      );
+    } else if (source.legacyDescriptorUrl) {
+      descriptorUrls = [source.legacyDescriptorUrl];
+    }
+  }
+
+  if (!descriptorUrls.length) {
+    throw new Error('The repository must expose noir.plugins.json or noir.plugin.json.');
+  }
+
+  const plugins = await Promise.all(descriptorUrls.map(async (descriptorUrl) => {
+    const descriptor = await fetchDescriptor(descriptorUrl);
+    validateDescriptor(descriptor);
+    return {
+      id: descriptor.manifest.id,
+      repositoryUrl: source.repositoryUrl,
+      descriptorUrl,
+      entryUrl: resolveEntryUrl(descriptorUrl, descriptor.entry),
+      manifest: descriptor.manifest,
+      integrity: normalizeIntegrity(descriptor.integrity),
+    } satisfies GitHubPluginCandidate;
+  }));
+
+  const uniquePlugins = plugins.filter((plugin, index, all) =>
+    all.findIndex((candidate) => candidate.id === plugin.id) === index,
+  );
+  if (!uniquePlugins.length) {
+    throw new Error('The repository catalog does not contain any valid plugins.');
+  }
+
+  return {
+    repositoryUrl: source.repositoryUrl,
+    catalogUrl: source.catalogUrl || source.descriptorUrl || source.legacyDescriptorUrl || source.repositoryUrl,
+    name: repositoryName,
+    description: repositoryDescription,
+    plugins: uniquePlugins,
+  };
+}
+
+export async function installGitHubPluginCandidate(
+  candidate: GitHubPluginCandidate,
+): Promise<InstalledGitHubPlugin> {
+  const entrySource = await fetchText(candidate.entryUrl);
+  if (candidate.integrity) await assertIntegrity(entrySource, candidate.integrity);
 
   const current = readPluginCatalog();
-  const existing = current.github.find((plugin) => plugin.id === descriptor.manifest.id);
+  const existing = current.github.find((plugin) => plugin.id === candidate.id);
   const installed: InstalledGitHubPlugin = {
-    id: descriptor.manifest.id,
-    repositoryUrl: descriptorInfo.repositoryUrl,
-    descriptorUrl: descriptorInfo.descriptorUrl,
-    entryUrl,
-    manifest: descriptor.manifest,
-    grants: existing?.grants ?? getPluginDefaultGrants(descriptor.manifest),
+    id: candidate.id,
+    repositoryUrl: candidate.repositoryUrl,
+    descriptorUrl: candidate.descriptorUrl,
+    entryUrl: candidate.entryUrl,
+    manifest: candidate.manifest,
+    grants: existing?.grants ?? getPluginDefaultGrants(candidate.manifest),
     riskAcknowledgements: existing?.riskAcknowledgements ?? [],
-    integrity: integrity ?? undefined,
+    integrity: candidate.integrity,
     enabled: existing?.enabled ?? false,
     installedAt: existing?.installedAt ?? Date.now(),
   };
@@ -160,6 +231,14 @@ export async function installGitHubPlugin(repositoryInput: string): Promise<Inst
   };
   writePluginCatalog(next);
   return installed;
+}
+
+/** Backward-compatible one-plugin API for callers that still pass a repository URL. */
+export async function installGitHubPlugin(repositoryInput: string): Promise<InstalledGitHubPlugin> {
+  const repository = await discoverGitHubPluginRepository(repositoryInput);
+  const [candidate] = repository.plugins;
+  if (!candidate) throw new Error('The repository does not contain an installable plugin.');
+  return installGitHubPluginCandidate(candidate);
 }
 
 export function updateGitHubPluginPermissions(
@@ -208,15 +287,26 @@ function createGitHubPluginSelection(plugin: InstalledGitHubPlugin): PluginSelec
   };
 }
 
-async function resolveDescriptor(input: string): Promise<{ repositoryUrl: string; descriptorUrl: string }> {
+type GitHubSource = {
+  readonly repositoryUrl: string;
+  readonly catalogUrl?: string;
+  readonly descriptorUrl?: string;
+  readonly legacyDescriptorUrl?: string;
+};
+
+async function resolveGitHubSource(input: string): Promise<GitHubSource> {
   const url = new URL(input.trim());
   if (url.protocol !== 'https:') throw new Error('GitHub plugin links must use HTTPS.');
 
   if (url.hostname === 'raw.githubusercontent.com') {
-    if (!url.pathname.endsWith('.json')) throw new Error('A raw GitHub plugin link must point to a JSON descriptor.');
+    if (!url.pathname.endsWith('.json')) throw new Error('A raw GitHub plugin link must point to a JSON plugin catalog or descriptor.');
+    const parts = url.pathname.split('/').filter(Boolean);
+    if (parts.length < 2) throw new Error('Invalid raw GitHub plugin link.');
+    const repositoryUrl = `https://github.com/${parts.slice(0, 2).join('/')}`;
+    const isRepositoryCatalog = url.pathname.toLowerCase().endsWith('/noir.plugins.json');
     return {
-      repositoryUrl: `https://github.com/${url.pathname.split('/').slice(1, 3).join('/')}`,
-      descriptorUrl: url.toString(),
+      repositoryUrl,
+      ...(isRepositoryCatalog ? { catalogUrl: url.toString() } : { descriptorUrl: url.toString() }),
     };
   }
 
@@ -226,9 +316,11 @@ async function resolveDescriptor(input: string): Promise<{ repositoryUrl: string
     const [owner, repo, , ref, ...path] = parts;
     if (!owner || !repo || !ref || path.length === 0) throw new Error('Invalid GitHub file link.');
     const repositoryUrl = `https://github.com/${owner}/${repo.replace(/\.git$/i, '')}`;
+    const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${path.join('/')}`;
+    const isRepositoryCatalog = path.join('/').toLowerCase() === 'noir.plugins.json';
     return {
       repositoryUrl,
-      descriptorUrl: `https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${path.join('/')}`,
+      ...(isRepositoryCatalog ? { catalogUrl: rawUrl } : { descriptorUrl: rawUrl }),
     };
   }
 
@@ -242,8 +334,39 @@ async function resolveDescriptor(input: string): Promise<{ repositoryUrl: string
     : 'main';
   return {
     repositoryUrl,
-    descriptorUrl: `https://raw.githubusercontent.com/${owner}/${repo}/${branch.split('/').map(encodeURIComponent).join('/')}/noir.plugin.json`,
+    catalogUrl: `https://raw.githubusercontent.com/${owner}/${repo}/${branch.split('/').map(encodeURIComponent).join('/')}/noir.plugins.json`,
+    legacyDescriptorUrl: `https://raw.githubusercontent.com/${owner}/${repo}/${branch.split('/').map(encodeURIComponent).join('/')}/noir.plugin.json`,
   };
+}
+
+function parseRepositoryCatalog(value: unknown): {
+  readonly name: string;
+  readonly description: string;
+  readonly plugins: readonly string[];
+} {
+  if (!isRecord(value) || value.schemaVersion !== 1 || !Array.isArray(value.plugins)) {
+    throw new Error('noir.plugins.json must contain schemaVersion 1 and a plugins array.');
+  }
+
+  const plugins = value.plugins.map((entry) => {
+    if (typeof entry === 'string') return entry;
+    if (isRecord(entry) && typeof entry.descriptor === 'string') return entry.descriptor;
+    throw new Error('Every repository plugin entry must contain a descriptor path.');
+  }).filter((descriptor) => descriptor.trim().length > 0);
+
+  return {
+    name: typeof value.name === 'string' ? value.name.trim() : '',
+    description: typeof value.description === 'string' ? value.description.trim() : '',
+    plugins,
+  };
+}
+
+function resolveRepositoryFileUrl(catalogUrl: string, descriptor: string): string {
+  const descriptorUrl = new URL(descriptor, catalogUrl);
+  if (descriptorUrl.protocol !== 'https:' || descriptorUrl.hostname !== 'raw.githubusercontent.com') {
+    throw new Error('Repository plugin descriptors must resolve to raw.githubusercontent.com over HTTPS.');
+  }
+  return descriptorUrl.toString();
 }
 
 async function fetchDescriptor(url: string): Promise<GitHubPluginDescriptor> {
@@ -279,6 +402,13 @@ function resolveEntryUrl(descriptorUrl: string, entry: string): string {
 
 async function fetchJson<T>(url: string): Promise<T> {
   const response = await fetch(url, { headers: requestHeaders(url) });
+  if (!response.ok) throw new Error(`GitHub request failed (${response.status}).`);
+  return await response.json() as T;
+}
+
+async function fetchJsonOptional<T>(url: string): Promise<T | null> {
+  const response = await fetch(url, { headers: requestHeaders(url) });
+  if (response.status === 404) return null;
   if (!response.ok) throw new Error(`GitHub request failed (${response.status}).`);
   return await response.json() as T;
 }

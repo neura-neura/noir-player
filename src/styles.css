@@ -1679,6 +1679,84 @@ input[type='color'] {
   gap: 12px;
 }
 
+.plugin-manager-installed,
+.plugin-manager-repository {
+  display: grid;
+  gap: 12px;
+}
+
+.plugin-manager-repository .section-heading {
+  align-items: flex-start;
+}
+
+.plugin-manager-repository .section-heading h3 {
+  margin-bottom: 6px;
+}
+
+.plugin-manager-repository .section-heading a {
+  color: #8ed8ff;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.plugin-manager-count {
+  flex: 0 0 auto;
+  padding: 6px 9px;
+  border: 1px solid rgba(142, 216, 255, 0.2);
+  border-radius: 999px;
+  color: #8ed8ff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.plugin-manager-discovered-list {
+  display: grid;
+  gap: 10px;
+}
+
+.plugin-manager-discovered-card {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.plugin-manager-discovered-card > p,
+.plugin-manager-discovered-card > .plugin-manager-permissions {
+  grid-column: 1 / -1;
+}
+
+.plugin-discovered-select {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.plugin-discovered-select input {
+  flex: 0 0 auto;
+  margin-top: 4px;
+  accent-color: #39a7ff;
+}
+
+.plugin-discovered-select span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.plugin-discovered-select strong,
+.plugin-discovered-select code {
+  overflow-wrap: anywhere;
+}
+
+.plugin-manager-discovered-card.is-installed {
+  opacity: 0.68;
+}
+
+.plugin-manager-repository-actions {
+  justify-content: flex-end;
+}
+
 .plugin-manager-card {
   display: grid;
   gap: 10px;
