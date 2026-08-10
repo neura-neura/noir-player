@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
+import { RefreshCw } from 'lucide-react';
 import type {
   PluginCapability,
   PluginRuntimeStatus,
@@ -36,6 +37,24 @@ type PluginEntry = {
   readonly status?: PluginRuntimeStatus;
 };
 
+function isInstalledPluginChanged(
+  installed: InstalledGitHubPlugin,
+  candidate: GitHubPluginRepository['plugins'][number],
+): boolean {
+  return installed.descriptorUrl !== candidate.descriptorUrl
+    || installed.entryUrl !== candidate.entryUrl
+    || installed.integrity !== candidate.integrity
+    || JSON.stringify(installed.manifest) !== JSON.stringify(candidate.manifest);
+}
+
+function isRepositoryCatalog(repository: GitHubPluginRepository): boolean {
+  try {
+    return new URL(repository.catalogUrl).pathname.toLowerCase().endsWith('/noir.plugins.json');
+  } catch {
+    return false;
+  }
+}
+
 export function PluginManagerPanel({ locale, onClose }: PluginManagerPanelProps) {
   const runtime = usePluginRuntime();
   const messages = PLUGIN_MANAGER_MESSAGES[locale];
@@ -47,6 +66,7 @@ export function PluginManagerPanel({ locale, onClose }: PluginManagerPanelProps)
   const [busyId, setBusyId] = useState<string | null>(null);
   const [discovering, setDiscovering] = useState(false);
   const [installing, setInstalling] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [feedback, setFeedback] = useState('');
   const [restartNeeded, setRestartNeeded] = useState(false);
 
@@ -173,6 +193,92 @@ export function PluginManagerPanel({ locale, onClose }: PluginManagerPanelProps)
     setFeedback(messages.restart);
   }
 
+  async function refreshPlugins(): Promise<void> {
+    const currentRepository = repository;
+    const catalogBeforeRefresh = readPluginCatalog();
+    const sourceInputs = currentRepository
+      ? [currentRepository.catalogUrl]
+      : [...new Set(catalogBeforeRefresh.github.map((plugin) => plugin.repositoryUrl))];
+
+    setRefreshing(true);
+    setFeedback('');
+
+    if (!sourceInputs.length) {
+      setCatalog(catalogBeforeRefresh);
+      setFeedback(messages.refreshed(0, 0, 0));
+      setRefreshing(false);
+      return;
+    }
+
+    let updated = 0;
+    let available = 0;
+    let removed = 0;
+    const refreshedRepositories: GitHubPluginRepository[] = [];
+    const failures: string[] = [];
+
+    try {
+      for (const sourceInput of sourceInputs) {
+        try {
+          const previousCandidates = currentRepository?.catalogUrl === sourceInput
+            ? new Set(currentRepository.plugins.map((plugin) => plugin.id))
+            : new Set<string>();
+          const refreshedRepository = await discoverGitHubPluginRepository(sourceInput);
+          refreshedRepositories.push(refreshedRepository);
+          const candidateById = new Map(refreshedRepository.plugins.map((plugin) => [plugin.id, plugin]));
+          const installedForRepository = readPluginCatalog().github.filter(
+            (plugin) => plugin.repositoryUrl === refreshedRepository.repositoryUrl,
+          );
+
+          for (const installed of installedForRepository) {
+            const candidate = candidateById.get(installed.id);
+            if (!candidate) {
+              if (isRepositoryCatalog(refreshedRepository)) {
+                await runtime.remove(installed.id);
+                removeGitHubPlugin(installed.id);
+                removed += 1;
+              }
+              continue;
+            }
+
+            if (isInstalledPluginChanged(installed, candidate)) updated += 1;
+            await installGitHubPluginCandidate(candidate);
+          }
+
+          const installedIds = new Set(readPluginCatalog().github.map((plugin) => plugin.id));
+          available += refreshedRepository.plugins.filter((plugin) =>
+            !installedIds.has(plugin.id)
+            && (!currentRepository || !previousCandidates.has(plugin.id)),
+          ).length;
+        } catch (error) {
+          failures.push(error instanceof Error ? error.message : 'unknown error');
+        }
+      }
+
+      const refreshedCatalog = readPluginCatalog();
+      setCatalog(refreshedCatalog);
+      if (updated > 0) setRestartNeeded(true);
+
+      const nextRepository = currentRepository
+        ? refreshedRepositories.find((candidate) => candidate.repositoryUrl === currentRepository.repositoryUrl)
+        : refreshedRepositories[0];
+      if (nextRepository) {
+        setRepository(nextRepository);
+        if (!currentRepository) setRepositoryUrl(nextRepository.repositoryUrl);
+        const installedIds = new Set(refreshedCatalog.github.map((plugin) => plugin.id));
+        setSelectedPluginIds(new Set(
+          nextRepository.plugins
+            .filter((plugin) => !installedIds.has(plugin.id))
+            .map((plugin) => plugin.id),
+        ));
+      }
+
+      const summary = messages.refreshed(updated, available, removed);
+      setFeedback(failures.length ? `${summary} ${messages.failed(failures[0])}` : summary);
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
   async function submitRepository(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (!repositoryUrl.trim()) return;
@@ -264,7 +370,23 @@ export function PluginManagerPanel({ locale, onClose }: PluginManagerPanelProps)
           <p className='eyebrow'>{messages.eyebrow}</p>
           <h2>{messages.title}</h2>
         </div>
-        <button type='button' className='panel-close' onClick={onClose}>{messages.close}</button>
+        <div className='plugin-manager-header-actions'>
+          <button
+            type='button'
+            className='ghost-button plugin-manager-refresh'
+            onClick={() => void refreshPlugins()}
+            disabled={refreshing || discovering || installing}
+            aria-busy={refreshing}
+          >
+            <RefreshCw
+              size={16}
+              aria-hidden='true'
+              className={refreshing ? 'plugin-manager-refresh-icon is-refreshing' : 'plugin-manager-refresh-icon'}
+            />
+            {refreshing ? messages.refreshing : messages.refresh}
+          </button>
+          <button type='button' className='panel-close' onClick={onClose}>{messages.close}</button>
+        </div>
       </div>
 
       <div className='plugin-manager-body'>
@@ -280,9 +402,9 @@ export function PluginManagerPanel({ locale, onClose }: PluginManagerPanelProps)
               onChange={(event) => setRepositoryUrl(event.target.value)}
               placeholder={messages.githubPlaceholder}
               aria-label={messages.githubPlaceholder}
-              disabled={discovering || installing}
+              disabled={discovering || installing || refreshing}
             />
-            <button type='submit' className='primary-button' disabled={discovering || installing || !repositoryUrl.trim()}>
+            <button type='submit' className='primary-button' disabled={discovering || installing || refreshing || !repositoryUrl.trim()}>
               {discovering ? messages.discovering : messages.discover}
             </button>
           </form>
@@ -309,7 +431,7 @@ export function PluginManagerPanel({ locale, onClose }: PluginManagerPanelProps)
                       <input
                         type='checkbox'
                         checked={selected}
-                        disabled={installed || installing}
+                        disabled={installed || installing || refreshing}
                         onChange={(event) => toggleDiscoveredPlugin(candidate.id, event.target.checked)}
                       />
                       <span>
@@ -330,16 +452,16 @@ export function PluginManagerPanel({ locale, onClose }: PluginManagerPanelProps)
               })}
             </div>
             <div className='plugin-manager-actions plugin-manager-repository-actions'>
-              <button type='button' className='ghost-button' disabled={installing} onClick={selectAllDiscoveredPlugins}>
+              <button type='button' className='ghost-button' disabled={installing || refreshing} onClick={selectAllDiscoveredPlugins}>
                 {messages.selectAll}
               </button>
-              <button type='button' className='ghost-button' disabled={installing} onClick={clearDiscoveredPluginSelection}>
+              <button type='button' className='ghost-button' disabled={installing || refreshing} onClick={clearDiscoveredPluginSelection}>
                 {messages.clearSelection}
               </button>
               <button
                 type='button'
                 className='primary-button'
-                disabled={installing || !repository.plugins.some((plugin) => selectedPluginIds.has(plugin.id))}
+                disabled={installing || refreshing || !repository.plugins.some((plugin) => selectedPluginIds.has(plugin.id))}
                 onClick={() => void installSelectedPlugins()}
               >
                 {installing ? messages.installingSelected : messages.installSelected}

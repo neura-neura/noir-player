@@ -92,11 +92,22 @@ code {
 }
 
 .app-shell-native-fullscreen {
-  min-height: 100vh;
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
   padding: 0;
   display: block;
   overflow: hidden;
   background: transparent;
+}
+
+html:has(.app-shell-native-fullscreen),
+body:has(.app-shell-native-fullscreen),
+#root:has(.app-shell-native-fullscreen) {
+  height: 100%;
+  overflow: hidden;
 }
 
 .app-shell-native-fullscreen .app-header,
@@ -108,7 +119,8 @@ code {
 .app-shell-native-fullscreen .app-main,
 .app-shell-native-fullscreen .player-layout,
 .app-shell-native-fullscreen .player-card {
-  min-height: 100vh;
+  height: 100%;
+  min-height: 0;
 }
 
 .app-shell-native-fullscreen .player-layout {
@@ -125,7 +137,8 @@ code {
 
 .app-shell-native-fullscreen .player-frame {
   width: 100%;
-  height: 100vh;
+  height: 100%;
+  min-height: 0;
   max-height: none;
   aspect-ratio: auto;
   border-radius: 0;
@@ -1656,6 +1669,39 @@ input[type='color'] {
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+.plugin-manager-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.plugin-manager-header-actions .panel-close {
+  margin-left: 0;
+}
+
+.plugin-manager-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.plugin-manager-refresh-icon {
+  flex: 0 0 auto;
+}
+
+@keyframes plugin-manager-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.plugin-manager-refresh-icon.is-refreshing {
+  animation: plugin-manager-refresh-spin 900ms linear infinite;
+}
+
 .plugin-manager-header h2,
 .plugin-manager-card h3 {
   margin: 0;
@@ -1886,6 +1932,10 @@ input[type='color'] {
 }
 
 @media (max-width: 640px) {
+  .plugin-manager-header-actions {
+    flex-wrap: wrap;
+  }
+
   .plugin-manager-panel {
     top: 12px;
     right: 12px;
@@ -1899,6 +1949,10 @@ input[type='color'] {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .plugin-manager-refresh-icon.is-refreshing {
+    animation: none;
+  }
+
   .plugin-playback-stats-overlay {
     transition: none;
   }

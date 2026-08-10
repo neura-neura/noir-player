@@ -4,6 +4,8 @@ export interface PluginManagerMessages {
   readonly title: string;
   readonly eyebrow: string;
   readonly close: string;
+  readonly refresh: string;
+  readonly refreshing: string;
   readonly repositoryTitle: string;
   readonly githubPlaceholder: string;
   readonly discover: string;
@@ -39,6 +41,7 @@ export interface PluginManagerMessages {
   readonly enabled: (name: string) => string;
   readonly disabled: (name: string) => string;
   readonly removed: (name: string) => string;
+  readonly refreshed: (updated: number, available: number, removed: number) => string;
   readonly failed: (message: string) => string;
 }
 
@@ -47,6 +50,8 @@ export const PLUGIN_MANAGER_MESSAGES: Record<AppLocale, PluginManagerMessages> =
     title: 'Plugin manager',
     eyebrow: 'Host extensions',
     close: 'Close',
+    refresh: 'Refresh',
+    refreshing: 'Refreshing…',
     repositoryTitle: 'Open a plugin repository',
     githubPlaceholder: 'https://github.com/owner/plugin-repository',
     discover: 'Open repository',
@@ -82,12 +87,15 @@ export const PLUGIN_MANAGER_MESSAGES: Record<AppLocale, PluginManagerMessages> =
     enabled: (name) => `${name} enabled.`,
     disabled: (name) => `${name} disabled.`,
     removed: (name) => `${name} removed.`,
+    refreshed: (updated, available, removed) => `Refreshed. ${updated} updated, ${available} new available, ${removed} removed.`,
     failed: (message) => `Plugin operation failed: ${message}`,
   },
   es: {
     title: 'Administrador de plugins',
     eyebrow: 'Extensiones del host',
     close: 'Cerrar',
+    refresh: 'Actualizar',
+    refreshing: 'Actualizando…',
     repositoryTitle: 'Abrir repositorio de plugins',
     githubPlaceholder: 'https://github.com/usuario/repositorio-plugin',
     discover: 'Abrir repositorio',
@@ -123,12 +131,15 @@ export const PLUGIN_MANAGER_MESSAGES: Record<AppLocale, PluginManagerMessages> =
     enabled: (name) => `${name} activado.`,
     disabled: (name) => `${name} desactivado.`,
     removed: (name) => `${name} eliminado.`,
+    refreshed: (updated, available, removed) => `Actualizado. ${updated} actualizados, ${available} nuevos disponibles, ${removed} eliminados.`,
     failed: (message) => `Falló la operación del plugin: ${message}`,
   },
   zh: {
     title: '插件管理器',
     eyebrow: '主机扩展',
     close: '关闭',
+    refresh: '刷新',
+    refreshing: '正在刷新…',
     repositoryTitle: '打开插件仓库',
     githubPlaceholder: 'https://github.com/owner/plugin-repository',
     discover: '打开仓库',
@@ -164,6 +175,7 @@ export const PLUGIN_MANAGER_MESSAGES: Record<AppLocale, PluginManagerMessages> =
     enabled: (name) => `${name} 已启用。`,
     disabled: (name) => `${name} 已停用。`,
     removed: (name) => `${name} 已移除。`,
+    refreshed: (updated, available, removed) => `已刷新。更新 ${updated} 个，新增可用 ${available} 个，移除 ${removed} 个。`,
     failed: (message) => `插件操作失败：${message}`,
   },
 };
