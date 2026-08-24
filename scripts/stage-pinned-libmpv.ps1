@@ -28,7 +28,17 @@ function DownloadAndVerify([string]$url, [string]$destination, [string]$expected
   New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
   Write-Host "Downloading pinned native archive $url"
   Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $destination
-  $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash.ToUpperInvariant()
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $stream = [System.IO.File]::OpenRead($destination)
+    try {
+      $actualHash = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToUpperInvariant()
+    } finally {
+      $stream.Dispose()
+    }
+  } finally {
+    $sha.Dispose()
+  }
   if ($actualHash -ne $expectedHash) {
     throw "SHA-256 mismatch for $url. Expected $expectedHash, got $actualHash."
   }

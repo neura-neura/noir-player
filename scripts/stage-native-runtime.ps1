@@ -51,7 +51,18 @@ foreach ($artifact in $manifest.artifacts) {
     throw "Native runtime artifact is missing: $artifact.path`nRun scripts/stage-native-runtime.ps1 to stage it."
   }
 
-  $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $artifactPath).Hash.ToUpperInvariant()
+  # Windows PowerShell 5.1 on some CI images does not expose Get-FileHash.
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $stream = [System.IO.File]::OpenRead($artifactPath)
+    try {
+      $actualHash = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToUpperInvariant()
+    } finally {
+      $stream.Dispose()
+    }
+  } finally {
+    $sha.Dispose()
+  }
   $expectedHash = ([string]$artifact.sha256).ToUpperInvariant()
   if ($actualHash -ne $expectedHash) {
     throw "SHA-256 mismatch for $artifact.path. Expected $expectedHash, got $actualHash."
