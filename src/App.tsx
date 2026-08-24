@@ -42,8 +42,15 @@ import {
 import { PluginManagerPanel, usePluginRuntime, PluginSlot } from '@/plugins/ui';
 import { PLUGIN_MANAGER_MESSAGES } from '@/plugins/ui/plugin-manager-messages';
 import { useAppPluginBridge } from '@/player/core/use-app-plugin-bridge';
+import { shouldHandlePlaybackSpace } from '@/player/core/playback-shortcuts';
 import { createTauriNativeBridge, type NativeUnsubscribe } from '@/player/adapters/native-bridge';
 import { NativeSurfaceCoordinator } from '@/player/adapters/native-surface-coordinator';
+import {
+  getUpdaterState,
+  installUpdate,
+  subscribeToUpdater,
+  type UpdaterState,
+} from '@/updater';
 
 type VideoSource = {
   src: string;
@@ -1026,6 +1033,7 @@ export default function App() {
     MESSAGES[readStoredLocale()].notices.welcome,
   );
   const [toast, setToast] = useState<ToastState | null>(null);
+  const [updaterState, setUpdaterState] = useState<UpdaterState>(getUpdaterState);
   const [subtitleStyle, setSubtitleStyle] =
     useState<SubtitleStyle>(readStoredStyle);
   const [syncOffsetMs, setSyncOffsetMs] = useState(readStoredSyncOffset);
@@ -1168,6 +1176,31 @@ export default function App() {
   const nativeVolumeRangeStyle = {
     '--range-progress': `${nativeVolumePercent}%`,
   } as CSSProperties;
+  const desktopUpdaterAvailable = isDesktopApp();
+  const updaterBusy =
+    updaterState.phase === 'checking' ||
+    updaterState.phase === 'available' ||
+    updaterState.phase === 'downloading' ||
+    updaterState.phase === 'installing' ||
+    updaterState.phase === 'relaunching';
+  const updaterVersion = updaterState.version ?? '';
+  const updaterStatusMessage = !desktopUpdaterAvailable
+    ? messages.updater.desktopOnly
+    : updaterState.phase === 'checking'
+      ? messages.updater.checking
+      : updaterState.phase === 'available'
+        ? messages.updater.available(updaterVersion)
+        : updaterState.phase === 'downloading'
+          ? messages.updater.downloading(updaterVersion, updaterState.progress)
+          : updaterState.phase === 'installing'
+            ? messages.updater.installing(updaterVersion)
+            : updaterState.phase === 'relaunching'
+              ? messages.updater.relaunching
+              : updaterState.phase === 'up-to-date'
+                ? messages.updater.upToDate
+                : updaterState.phase === 'error'
+                  ? messages.updater.failed
+                  : '';
 
   const remoteFontOptions = remoteFontFamilies.map((fontName) => ({
     label: `${fontName} (CSS)`,
@@ -1227,6 +1260,7 @@ export default function App() {
   const seekPlaybackByEvent = useStableEvent(seekPlaybackBy);
   const toggleNativeFullscreenEvent = useStableEvent(toggleNativeFullscreen);
   const togglePlayerFullscreenEvent = useStableEvent(togglePlayerFullscreen);
+  const togglePlaybackEvent = useStableEvent(togglePlayback);
   const setVideoInternalAudioMutedEvent = useStableEvent(setVideoInternalAudioMuted);
   const selectAudioTrackEvent = useStableEvent(selectAudioTrack);
   const prepareAudioTrackEvent = useStableEvent(prepareAudioTrack);
@@ -1244,6 +1278,8 @@ export default function App() {
       playbackRate: mpvPlaybackRate,
     };
   }, [mpvDuration, mpvPaused, mpvPlaybackRate, mpvTimePos]);
+
+  useEffect(() => subscribeToUpdater(setUpdaterState), []);
 
   useEffect(() => {
     if (!isDesktopApp()) {
@@ -2535,6 +2571,29 @@ export default function App() {
       // Fullscreen can be denied by the browser until a user gesture is received.
     }
   }
+
+  useEffect(() => {
+    if (!videoSource) {
+      return;
+    }
+
+    const handlePlaybackSpaceShortcut = (event: KeyboardEvent) => {
+      if (!shouldHandlePlaybackSpace(event)) {
+        return;
+      }
+
+      // Capture the event before Plyr/native controls see it. This prevents a
+      // second toggle and keeps the browser from scrolling the page.
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      void togglePlaybackEvent();
+    };
+
+    window.addEventListener('keydown', handlePlaybackSpaceShortcut, true);
+    return () => {
+      window.removeEventListener('keydown', handlePlaybackSpaceShortcut, true);
+    };
+  }, [togglePlaybackEvent, videoSource]);
 
   useEffect(() => {
     if (!isDesktopApp() && !videoSource) {
@@ -4435,8 +4494,10 @@ export default function App() {
         ],
         settings: [],
         keyboard: {
-          focused: true,
-          global: true,
+          // The app owns the space-bar shortcut. Keeping Plyr's keyboard
+          // listener disabled avoids processing the same key twice.
+          focused: false,
+          global: false,
         },
         fullscreen: {
           enabled: true,
@@ -4879,7 +4940,12 @@ export default function App() {
         setPanelVisible(true);
         if (tab === 'load' || tab === 'playlist' || tab === 'style') setPanelTab(tab);
       },
-      closePanel: () => setPanelVisible(false),
+      closePanel: () => {
+        setPanelVisible(false);
+        if (typeof document !== 'undefined' && document.activeElement instanceof HTMLElement) {
+          document.activeElement.blur();
+        }
+      },
       showNotice: (message) => setNotice(message),
     },
   });
@@ -5435,7 +5501,12 @@ export default function App() {
                     <button
                       type='button'
                       className='panel-close'
-                      onClick={() => setPanelVisible(false)}
+                      onClick={() => {
+                        setPanelVisible(false);
+                        if (document.activeElement instanceof HTMLElement) {
+                          document.activeElement.blur();
+                        }
+                      }}
                     >
                       {messages.panel.close}
                     </button>
@@ -6538,6 +6609,50 @@ export default function App() {
                           {messages.style.restoreDefault}
                         </button>
                       </div>
+
+                      <section className='settings-section updater-section'>
+                        <div className='section-heading'>
+                          <h3>{messages.updater.title}</h3>
+                        </div>
+                        <p id='noir-updater-description' className='updater-description'>
+                          {messages.updater.description}
+                        </p>
+                        <div className='updater-actions'>
+                          <button
+                            type='button'
+                            className='primary-button updater-button'
+                            disabled={!desktopUpdaterAvailable || updaterBusy}
+                            aria-busy={updaterBusy}
+                            aria-describedby='noir-updater-description noir-updater-status'
+                            onClick={() => {
+                              void installUpdate().catch(() => {
+                                // The updater controller exposes a safe error state to the UI.
+                              });
+                            }}
+                          >
+                            {messages.updater.check}
+                          </button>
+                          {updaterState.phase === 'downloading' ||
+                          updaterState.phase === 'installing' ? (
+                            <progress
+                              className='updater-progress'
+                              max={100}
+                              value={updaterState.progress ?? undefined}
+                              aria-label={updaterStatusMessage}
+                            />
+                          ) : null}
+                        </div>
+                        <p
+                          id='noir-updater-status'
+                          className={`updater-status ${
+                            updaterState.phase === 'error' ? 'updater-status-error' : ''
+                          }`}
+                          role='status'
+                          aria-live='polite'
+                        >
+                          {updaterStatusMessage}
+                        </p>
+                      </section>
                     </div>
                   )}
                 </aside>

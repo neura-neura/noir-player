@@ -213,6 +213,23 @@ export const zh: AppMessages = {
     paddingY: 'çºµå‘å†…è¾¹è·',
     radius: 'åœ†è§’',
   },
+  updater: {
+    title: 'Noir updates',
+    description:
+      'Check the official repository for a signed release. Noir will close completely and start the installer after downloading an update.',
+    check: 'Check for updates',
+    checking: 'Checking for a newer version...',
+    available: (version) => `Version ${version} is available. Preparing the download...`,
+    downloading: (version, progress) =>
+      progress === null
+        ? `Downloading Noir ${version}...`
+        : `Downloading Noir ${version}: ${Math.round(progress)}%`,
+    installing: (version) => `Noir ${version} is ready. Starting the installer...`,
+    relaunching: 'Closing Noir and finishing the update...',
+    upToDate: 'You already have the latest version.',
+    failed: 'The update could not be completed. Check your connection and try again.',
+    desktopOnly: 'Updates are available in the installed desktop app.',
+  },
   footer: {
     hint: 'æç¤ºï¼šä½¿ç”¨ Ctrl + Shift + I æ£€æŸ¥ `.caption-text`ã€‚',
   },

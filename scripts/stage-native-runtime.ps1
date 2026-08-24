@@ -1,6 +1,7 @@
 param(
   [switch]$VerifyOnly,
-  [string]$FfmpegDirectory = ""
+  [string]$FfmpegDirectory = "",
+  [switch]$SkipLibmpvSetup
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,10 +16,14 @@ if ($manifest.schemaVersion -ne 1 -or $manifest.target -ne "windows-x86_64") {
 if (-not $VerifyOnly) {
   Push-Location $repoRoot
   try {
-    Write-Host "Preparing libmpv DLLs with tauri-plugin-libmpv-api..."
-    & npx --yes tauri-plugin-libmpv-api setup-lib
-    if ($LASTEXITCODE -ne 0) {
-      throw "libmpv setup failed with exit code $LASTEXITCODE."
+    if ($SkipLibmpvSetup) {
+      Write-Host "Skipping dynamic libmpv setup; using the already staged pinned runtime."
+    } else {
+      Write-Host "Preparing libmpv DLLs with tauri-plugin-libmpv-api..."
+      & npx --yes tauri-plugin-libmpv-api setup-lib
+      if ($LASTEXITCODE -ne 0) {
+        throw "libmpv setup failed with exit code $LASTEXITCODE."
+      }
     }
 
     $stageScript = Join-Path $repoRoot "scripts/stage-ffmpeg.ps1"

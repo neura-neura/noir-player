@@ -11,6 +11,8 @@
     "core:window:allow-set-fullscreen",
     "core:window:allow-is-fullscreen",
     "dialog:default",
-    "libmpv:default"
+    "libmpv:default",
+    "process:default",
+    "updater:default"
   ]
 }

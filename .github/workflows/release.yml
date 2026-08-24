@@ -1,0 +1,146 @@
+name: Release Windows x64
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: noir-player-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish-windows:
+    # Keep this job scoped to version tags even if the workflow is dispatched
+    # manually in the future.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Check release version metadata
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v(?<version>.+)$') {
+            throw "Release workflow only accepts v* tags"
+          }
+          $tagVersion = $Matches.version
+          $packageVersion = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          $tauriVersion = (Get-Content -Raw src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          $cargoVersion = $null
+          foreach ($line in Get-Content src-tauri/Cargo.toml) {
+            if ($line -match '^\s*version\s*=\s*"([^"]+)"') {
+              $cargoVersion = $Matches[1]
+              break
+            }
+          }
+          if ([string]::IsNullOrWhiteSpace($cargoVersion)) {
+            throw "Could not read [package].version from src-tauri/Cargo.toml"
+          }
+          $versions = @{
+            tag = $tagVersion
+            package = [string]$packageVersion
+            tauri = [string]$tauriVersion
+            cargo = [string]$cargoVersion
+          }
+          if ($packageVersion -ne $tagVersion -or
+              $tauriVersion -ne $tagVersion -or
+              $cargoVersion -ne $tagVersion) {
+            throw "Release tag/version mismatch: $($versions | ConvertTo-Json -Compress)"
+          }
+
+      # windows-latest does not guarantee FFmpeg on PATH. Install the exact
+      # package version pinned by scripts/native-runtime-manifest.json so the
+      # existing staging script can verify the resulting executables.
+      - name: Install pinned FFmpeg build
+        shell: pwsh
+        run: choco install ffmpeg-full --version=8.0.1 --no-progress --yes
+
+      - name: Install 7-Zip
+        shell: pwsh
+        run: choco install 7zip --no-progress --yes
+
+      - name: Stage pinned libmpv runtime
+        shell: pwsh
+        run: ./scripts/stage-pinned-libmpv.ps1
+
+      # The native DLLs and FFmpeg helpers are intentionally ignored generated
+      # artifacts. Keep this preparation before tauri-action builds the bundle.
+      - name: Stage native runtime
+        shell: pwsh
+        run: npm run stage:native -- -SkipLibmpvSetup -FfmpegDirectory 'C:\ProgramData\chocolatey\lib\ffmpeg-full\tools\ffmpeg\bin'
+
+      - name: Verify native runtime
+        shell: pwsh
+        run: npm run verify:native
+
+      - name: Check updater configuration
+        shell: pwsh
+        run: |
+          $config = Get-Content -Raw src-tauri/tauri.conf.json | ConvertFrom-Json
+          if ($config.bundle.createUpdaterArtifacts -ne $true) {
+            throw "src-tauri/tauri.conf.json must set bundle.createUpdaterArtifacts=true"
+          }
+          $pubkey = [string]$config.plugins.updater.pubkey
+          if ([string]::IsNullOrWhiteSpace($pubkey) -or $pubkey.Contains('__TAURI_UPDATER_PUBLIC_KEY_REQUIRED__')) {
+            throw "Replace plugins.updater.pubkey with the public key from tauri signer generate before publishing"
+          }
+          $endpoint = [string]$config.plugins.updater.endpoints[0]
+          if (-not $endpoint.StartsWith('https://')) {
+            throw "plugins.updater.endpoints must contain an HTTPS updater endpoint"
+          }
+
+      - name: Check updater signing secrets
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw "Missing required GitHub Actions secret: TAURI_SIGNING_PRIVATE_KEY"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+            throw "Missing required GitHub Actions secret: TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+          }
+
+      - name: Build and publish signed updater release
+        uses: tauri-apps/tauri-action@v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          # The pushed v* tag is also used in latest.json download URLs.
+          tagName: ${{ github.ref_name }}
+          releaseName: Noir Player ${{ github.ref_name }}
+          releaseBody: Signed Windows x64 installers and updater artifacts.
+          releaseDraft: false
+          prerelease: false
+          generateReleaseNotes: true
+          tauriScript: npm run tauri
+          args: --target x86_64-pc-windows-msvc --bundles nsis,msi
+          # Tauri v2's updater prefers the NSIS setup.exe when both installers
+          # are present; the action uploads latest.json and all .sig files.
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          uploadUpdaterSignatures: true

@@ -72,7 +72,9 @@ npm run check
 `npm run check` runs the frontend/workspace boundary checks, lint, tests, and
 production build. `npm run check:rust` runs `cargo fmt --check`, clippy with
 `-D warnings`, and Rust tests. `npm run tauri dev` runs the desktop shell;
-`npm run tauri build` creates the installer.
+`npm run tauri build` creates the installer. Signed in-app update releases and
+their required GitHub secrets are documented in
+[`docs/release-updater.md`](docs/release-updater.md).
 
 For a self-contained Windows build, stage and hash the complete native runtime
 (libmpv DLLs plus FFmpeg/FFprobe) with one command:

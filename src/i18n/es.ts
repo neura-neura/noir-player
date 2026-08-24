@@ -220,6 +220,23 @@ export const es: AppMessages = {
     paddingY: 'Relleno Y',
     radius: 'Radio',
   },
+  updater: {
+    title: 'Actualizaciones de Noir',
+    description:
+      'Busca una versión firmada en el repositorio oficial. Si existe, Noir la descargará, se cerrará por completo e iniciará el instalador.',
+    check: 'Buscar actualizaciones',
+    checking: 'Buscando una versión más reciente...',
+    available: (version) => `La versión ${version} está disponible. Preparando la descarga...`,
+    downloading: (version, progress) =>
+      progress === null
+        ? `Descargando Noir ${version}...`
+        : `Descargando Noir ${version}: ${Math.round(progress)}%`,
+    installing: (version) => `Noir ${version} está listo. Iniciando el instalador...`,
+    relaunching: 'Cerrando Noir y terminando la actualización...',
+    upToDate: 'Ya tienes la versión más reciente.',
+    failed: 'No se pudo completar la actualización. Revisa tu conexión e inténtalo otra vez.',
+    desktopOnly: 'Las actualizaciones están disponibles en la aplicación de escritorio instalada.',
+  },
   footer: {
     hint: 'Tip: usa Ctrl + Shift + I para inspeccionar `.caption-text`.',
   },

@@ -189,6 +189,19 @@ export type AppMessages = {
     paddingY: string;
     radius: string;
   };
+  updater: {
+    title: string;
+    description: string;
+    check: string;
+    checking: string;
+    available: (version: string) => string;
+    downloading: (version: string, progress: number | null) => string;
+    installing: (version: string) => string;
+    relaunching: string;
+    upToDate: string;
+    failed: string;
+    desktopOnly: string;
+  };
   footer: {
     hint: string;
   };
