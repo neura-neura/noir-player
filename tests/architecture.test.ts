@@ -33,7 +33,7 @@ describe('plugin architecture boundaries', () => {
     expect(staging).toContain('current\\bin');
     expect(staging).toContain('SourceDirectory');
     expect(nativeStaging).toContain('tauri-plugin-libmpv-api setup-lib');
-    expect(nativeStaging).toContain('Get-FileHash -Algorithm SHA256');
+    expect(nativeStaging).toContain('[System.Security.Cryptography.SHA256]::Create()');
     expect(nativeManifest).toContain('libmpv-2.dll');
     expect(nativeManifest).toContain('ffmpeg.exe');
     expect(buildScript).toContain('resources/bin/ffmpeg.exe');
