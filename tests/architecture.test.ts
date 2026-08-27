@@ -47,4 +47,10 @@ describe('plugin architecture boundaries', () => {
       appSource.indexOf('if (isDesktopApp())', appSource.indexOf('async function openVideoFromPath')),
     );
   });
+
+  it('lets native playback controls hide even when a control keeps focus', async () => {
+    const styles = await readFile('src/styles.css', 'utf8');
+    expect(styles).toContain('.player-frame.playback-controls-visible .native-control-bar');
+    expect(styles).not.toContain('.native-control-bar:focus-within');
+  });
 });

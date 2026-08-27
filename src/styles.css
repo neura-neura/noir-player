@@ -533,8 +533,9 @@ body:has(.app-shell-native-fullscreen),
   will-change: opacity, transform;
 }
 
-.player-frame.playback-controls-visible .native-control-bar,
-.native-control-bar:focus-within {
+/* The parent activity state owns visibility. A focused button or slider must
+   not pin the bar onscreen after pointer inactivity. */
+.player-frame.playback-controls-visible .native-control-bar {
   opacity: 1;
   transform: translateY(0);
   pointer-events: auto;

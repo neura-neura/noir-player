@@ -8,7 +8,7 @@ import {
 function fakeUpdate(): UpdaterResource {
   return {
     version: '0.2.0',
-    currentVersion: '0.1.15',
+    currentVersion: '0.1.16',
     body: 'Mejoras de reproducción',
     date: '2026-08-23T00:00:00Z',
     downloadAndInstall: async (onEvent) => {
