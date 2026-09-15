@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 
 import { beforeEach, describe, expect, it } from 'vitest';
-import { shouldHandlePlaybackSpace } from '@/player/core/playback-shortcuts';
+import { playbackAdjustment, shouldHandlePlaybackSpace } from '@/player/core/playback-shortcuts';
 
 function dispatchSpace(target: EventTarget, init: KeyboardEventInit = {}) {
   const event = new KeyboardEvent('keydown', {
@@ -86,5 +86,27 @@ describe('playback space shortcut target guard', () => {
         })(),
       ),
     ).toBe(true);
+  });
+});
+
+describe('playback adjustments', () => {
+  it.each([
+    ['d', {}, 'rate-up'], ['s', {}, 'rate-down'], ['r', {}, 'rate-reset'],
+    ['c', {}, 'captions'], ['m', {}, 'mute'], ['ArrowUp', {}, 'volume-up'],
+    ['ArrowDown', {}, 'volume-down'], ['+', { ctrlKey: true }, 'font-up'],
+    ['=', { ctrlKey: true }, 'font-up'], ['-', { ctrlKey: true }, 'font-down'],
+    ['d', { ctrlKey: true }, null], ['c', { repeat: true }, null],
+    ['d', { repeat: true }, 'rate-up'],
+    ['ArrowLeft', {}, 'seek-back'], ['ArrowRight', {}, 'seek-forward'],
+    ['ArrowRight', { repeat: true }, 'seek-forward'],
+    ['ArrowRight', { ctrlKey: true }, null], ['ArrowLeft', { altKey: true }, null],
+  ])('maps %s with %j', (key, modifiers, expected) => {
+    expect(playbackAdjustment(dispatchSpace(document.body, { key, ...modifiers }))).toBe(expected);
+  });
+  it('does not change playback while entering text', () => {
+    const input = document.createElement('input');
+    document.body.append(input);
+    expect(playbackAdjustment(dispatchSpace(input, { key: 'd' }))).toBeNull();
+    expect(playbackAdjustment(dispatchSpace(input, { key: '+', ctrlKey: true }))).toBeNull();
   });
 });

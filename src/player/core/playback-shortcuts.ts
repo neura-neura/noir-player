@@ -95,3 +95,18 @@ export function shouldHandlePlaybackSpace(event: KeyboardEvent): boolean {
 
   return !isTypingTarget(target);
 }
+
+export function playbackAdjustment(event: KeyboardEvent): string | null {
+  if (event.defaultPrevented || event.isComposing || event.altKey || event.metaKey) return null;
+  const target = isElement(event.target) ? event.target : document.activeElement;
+  if (target && isTypingTarget(target)) return null;
+  if (event.ctrlKey) {
+    if (['+', '='].includes(event.key) || event.code === 'NumpadAdd') return 'font-up';
+    if (event.key === '-' || event.code === 'NumpadSubtract') return 'font-down';
+    return null;
+  }
+  const key = event.key.toLowerCase();
+  if (event.repeat && ['c', 'm', 'r'].includes(key)) return null;
+  return ({ d: 'rate-up', s: 'rate-down', r: 'rate-reset', c: 'captions', m: 'mute',
+    arrowup: 'volume-up', arrowdown: 'volume-down', arrowleft: 'seek-back', arrowright: 'seek-forward' } as Record<string, string>)[key] ?? null;
+}

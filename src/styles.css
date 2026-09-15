@@ -2131,3 +2131,29 @@ input[type='color'] {
     grid-template-columns: minmax(0, 1fr) auto;
   }
 }
+
+.player-frame.pointer-hidden,
+.player-frame.pointer-hidden * { cursor: none !important; }
+.playback-feedback-text {
+  width: auto;
+  min-width: 100px;
+  padding: 0 24px;
+  border-radius: 24px;
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.playback-rate-controls { display: flex; align-items: center; gap: 2px; }
+.playback-rate-controls button {
+  min-width: 32px;
+  min-height: 44px;
+  padding: 4px;
+  background: transparent;
+  color: inherit;
+  border: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.player-frame:has(.playback-feedback) .plyr__control--overlaid {
+  opacity: 0;
+}

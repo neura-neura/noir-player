@@ -1,4 +1,5 @@
-﻿import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, DragEvent, MouseEvent } from 'react';
 import { type EventCallback, type UnlistenFn } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -21,6 +22,7 @@ import {
   observeProperties as observeMpvProperties,
   listenEvents as listenMpvEvents,
   setProperty as setMpvProperty,
+  getProperty as getMpvProperty,
   type MpvObservableProperty,
 } from 'tauri-plugin-libmpv-api';
 import {
@@ -42,7 +44,7 @@ import {
 import { PluginManagerPanel, usePluginRuntime, PluginSlot } from '@/plugins/ui';
 import { PLUGIN_MANAGER_MESSAGES } from '@/plugins/ui/plugin-manager-messages';
 import { useAppPluginBridge } from '@/player/core/use-app-plugin-bridge';
-import { shouldHandlePlaybackSpace } from '@/player/core/playback-shortcuts';
+import { playbackAdjustment, shouldHandlePlaybackSpace } from '@/player/core/playback-shortcuts';
 import { createTauriNativeBridge, type NativeUnsubscribe } from '@/player/adapters/native-bridge';
 import { NativeSurfaceCoordinator } from '@/player/adapters/native-surface-coordinator';
 import {
@@ -490,6 +492,13 @@ function readStoredBoolean(storageKey: string, fallbackValue: boolean): boolean 
   } catch {
     return fallbackValue;
   }
+}
+
+function readStoredRate(): number {
+  try {
+    const rate = Number(window.localStorage.getItem('noir-player:rate') ?? 1);
+    return Number.isFinite(rate) ? clamp(rate, 0.25, 4) : 1;
+  } catch { return 1; }
 }
 
 function readStoredVolume(): number {
@@ -1001,8 +1010,16 @@ export default function App() {
   const [desktopWindowReady, setDesktopWindowReady] = useState(() => !isDesktopApp());
   const [playbackControlsVisible, setPlaybackControlsVisible] = useState(true);
   const [playbackFeedback, setPlaybackFeedback] = useState<
-    'play' | 'pause' | null
+    string | null
   >(null);
+  const [browserControls, setBrowserControls] = useState<HTMLElement | null>(null);
+  const [preferredRate, setPreferredRate] = useState(readStoredRate);
+  const [subtitlesVisible, setSubtitlesVisible] = useState(true);
+  const [pointerHidden, setPointerHidden] = useState(false);
+  const pointerTimerRef = useRef<number | null>(null);
+  const feedbackRevisionRef = useRef(0);
+  const nativeSeekFeedbackRef = useRef<{ direction: string; revision: number } | null>(null);
+  const browserVolumeFeedbackRef = useRef({ volume: readStoredVolume(), muted: false });
   const [systemFontsLoading, setSystemFontsLoading] = useState(false);
   const [systemFonts, setSystemFonts] = useState<string[]>([]);
   const [fontSearchQuery, setFontSearchQuery] = useState('');
@@ -1045,7 +1062,7 @@ export default function App() {
   const [mpvDuration, setMpvDuration] = useState(0);
   const [mpvVolume, setMpvVolume] = useState(readStoredVolume);
   const [mpvMuted, setMpvMuted] = useState(false);
-  const [mpvPlaybackRate, setMpvPlaybackRate] = useState(1);
+  const [mpvPlaybackRate, setMpvPlaybackRate] = useState(readStoredRate);
   const [mpvFilename, setMpvFilename] = useState<string | null>(null);
   const [mpvVideoWidth, setMpvVideoWidth] = useState(0);
   const [mpvVideoHeight, setMpvVideoHeight] = useState(0);
@@ -1257,10 +1274,10 @@ export default function App() {
   const capturePlaybackStateEvent = useStableEvent(capturePlaybackState);
   const openVideoFromPathEvent = useStableEvent(openVideoFromPath);
   const exitPlayerFullscreenEvent = useStableEvent(exitPlayerFullscreen);
-  const seekPlaybackByEvent = useStableEvent(seekPlaybackBy);
   const toggleNativeFullscreenEvent = useStableEvent(toggleNativeFullscreen);
   const togglePlayerFullscreenEvent = useStableEvent(togglePlayerFullscreen);
   const togglePlaybackEvent = useStableEvent(togglePlayback);
+  const showPlaybackFeedbackEvent = useStableEvent(showPlaybackFeedback);
   const setVideoInternalAudioMutedEvent = useStableEvent(setVideoInternalAudioMuted);
   const selectAudioTrackEvent = useStableEvent(selectAudioTrack);
   const prepareAudioTrackEvent = useStableEvent(prepareAudioTrack);
@@ -1378,14 +1395,88 @@ export default function App() {
     }
   }
 
-  function showPlaybackFeedback(nextFeedback: 'play' | 'pause') {
+  function showPlaybackFeedback(nextFeedback: string) {
     clearPlaybackFeedbackHideTimer();
+    feedbackRevisionRef.current += 1;
     setPlaybackFeedback(nextFeedback);
     playbackFeedbackHideTimerRef.current = window.setTimeout(() => {
       setPlaybackFeedback(null);
       playbackFeedbackHideTimerRef.current = null;
     }, 720);
   }
+
+  function revealPointer() {
+    setPointerHidden(false);
+    if (pointerTimerRef.current !== null) window.clearTimeout(pointerTimerRef.current);
+    pointerTimerRef.current = window.setTimeout(() => setPointerHidden(true), 2200);
+    revealPlaybackControls();
+  }
+
+  async function changeRate(value: number) {
+    const rate = clamp(Math.round(value * 10) / 10, 0.25, 4);
+    if (isNativeMpvSource) await setMpvProperty('speed', rate);
+    else if (videoElementRef.current) videoElementRef.current.playbackRate = rate;
+    setPreferredRate(rate);
+    try { window.localStorage.setItem('noir-player:rate', String(rate)); } catch { /* Storage optional. */ }
+    showPlaybackFeedback(`${rate.toFixed(1)}×`);
+  }
+
+  async function changeVolume(volume: number) {
+    const next = clamp(volume, 0, 1);
+    if (isNativeMpvSource) {
+      await setMpvProperty('volume', next * 100);
+      await setMpvProperty('mute', false);
+    } else if (videoElementRef.current) {
+      browserVolumeFeedbackRef.current = { volume: next, muted: false };
+      videoElementRef.current.volume = next;
+      videoElementRef.current.muted = false;
+    }
+    storeVolume(next);
+    showPlaybackFeedback(`VOL ${Math.round(next * 100)}%`);
+  }
+
+  async function toggleMute() {
+    const muted = !(isNativeMpvSource ? mpvMuted : videoElementRef.current?.muted);
+    if (isNativeMpvSource) await setMpvProperty('mute', muted);
+    else if (videoElementRef.current) {
+      browserVolumeFeedbackRef.current = { volume: videoElementRef.current.volume, muted };
+      videoElementRef.current.muted = muted;
+    }
+    showPlaybackFeedback(muted ? 'VOL OFF' : 'VOL ON');
+  }
+
+  const handleAdjustment = useStableEvent(async (action: string) => {
+    if (action.startsWith('rate-')) {
+      await changeRate(action === 'rate-reset' ? 1 : preferredRate + (action === 'rate-up' ? 0.1 : -0.1));
+    } else if (action === 'seek-back' || action === 'seek-forward') {
+      await seekPlaybackBy(action === 'seek-back' ? -5 : 5);
+    } else if (action === 'mute') await toggleMute();
+    else if (action.startsWith('volume-')) {
+      await changeVolume((isNativeMpvSource ? mpvVolume : videoElementRef.current?.volume ?? 1) + (action === 'volume-up' ? 0.05 : -0.05));
+    } else if (action === 'captions') {
+      const visible = !subtitlesVisible;
+      if (isNativeMpvSource) await setMpvProperty('sub-visibility', visible);
+      setSubtitlesVisible(visible);
+      showPlaybackFeedback(visible ? 'CC ON' : 'CC OFF');
+    } else {
+      const fontSize = clamp(subtitleStyle.fontSize + (action === 'font-up' ? 2 : -2), 8, 160);
+      setSubtitleStyle(previous => ({ ...previous, fontSize }));
+      showPlaybackFeedback(`CC ${fontSize}px`);
+    }
+  });
+
+  useEffect(() => {
+    if (!videoSource) return;
+    const listener = (event: KeyboardEvent) => {
+      const action = playbackAdjustment(event);
+      if (!action) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      void handleAdjustment(action).catch(console.error);
+    };
+    window.addEventListener('keydown', listener, true);
+    return () => window.removeEventListener('keydown', listener, true);
+  }, [videoSource, handleAdjustment]);
 
   function clearNativeVideoRefreshTimers() {
     nativeVideoRefreshTimersRef.current.forEach((timerId) =>
@@ -1436,6 +1527,7 @@ export default function App() {
     return () => {
       clearPlaybackControlsHideTimer();
       clearPlaybackFeedbackHideTimer();
+      if (pointerTimerRef.current !== null) window.clearTimeout(pointerTimerRef.current);
       clearNativeVideoRefreshTimers();
       nativeSurfaceCoordinatorRef.current?.dispose();
     };
@@ -1632,6 +1724,16 @@ export default function App() {
             return;
           }
 
+          if (event.event === 'playback-restart' && nativeSeekFeedbackRef.current) {
+            const feedback = nativeSeekFeedbackRef.current;
+            nativeSeekFeedbackRef.current = null;
+            void getMpvProperty('time-pos', 'double').then((position) => {
+              if (active && feedbackRevisionRef.current === feedback.revision && typeof position === 'number' && Number.isFinite(position)) {
+                showPlaybackFeedbackEvent(`${feedback.direction} ${formatPlaybackTime(Math.max(0, position))}`);
+              }
+            }).catch(() => undefined);
+          }
+
           if (event.event === 'file-loaded') {
             setMpvFileLoadedTick((currentValue) => currentValue + 1);
           }
@@ -1727,6 +1829,7 @@ export default function App() {
           observedProperties: MPV_OBSERVED_PROPERTIES,
         });
 
+        await setMpvProperty('speed', readStoredRate());
         await setMpvProperty('volume', readStoredVolume() * 100).catch(() => {
           // Keep the default volume if mpv rejects the initial preference.
         });
@@ -1753,7 +1856,7 @@ export default function App() {
         // Ignore shutdown errors while closing the desktop app.
       });
     };
-  }, []);
+  }, [showPlaybackFeedbackEvent]);
 
   function applyPendingSyncplayState(
     videoElement: HTMLVideoElement,
@@ -2390,14 +2493,19 @@ export default function App() {
     showPlaybackFeedback('pause');
   }
 
-  function seekPlaybackBy(seconds: number) {
+  async function seekPlaybackBy(seconds: number) {
     if (!videoSource) {
       return;
     }
 
     if (isNativeMpvSource) {
-      void mpvCommand('seek', [seconds, 'relative', 'exact']).catch(() => {
-        // Keep keyboard controls available if mpv is changing state.
+      const target = clamp(mpvTimePos + seconds, 0, mpvDuration > 0 ? mpvDuration : Number.POSITIVE_INFINITY);
+      const direction = seconds < 0 ? '←' : '→';
+      showPlaybackFeedback(`${direction} ${formatPlaybackTime(target)}`);
+      nativeSeekFeedbackRef.current = { direction, revision: feedbackRevisionRef.current };
+      await mpvCommand('seek', [seconds, 'relative', 'exact']).catch((error) => {
+        nativeSeekFeedbackRef.current = null;
+        throw error;
       });
       return;
     }
@@ -2413,7 +2521,9 @@ export default function App() {
     const duration = Number.isFinite(videoElement.duration)
       ? Math.max(0, videoElement.duration)
       : Number.POSITIVE_INFINITY;
-    videoElement.currentTime = clamp(currentTime + seconds, 0, duration);
+    const target = clamp(currentTime + seconds, 0, duration);
+    videoElement.currentTime = target;
+    showPlaybackFeedback(`${seconds < 0 ? '←' : '→'} ${formatPlaybackTime(target)}`);
   }
 
   function isPlayerInteractiveTarget(target: EventTarget | null): boolean {
@@ -2615,9 +2725,7 @@ export default function App() {
       } else if (event.key === 'Escape' && nativeFullscreen) {
         event.preventDefault();
         void exitPlayerFullscreenEvent();
-      } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-        event.preventDefault();
-        seekPlaybackByEvent(event.key === 'ArrowLeft' ? -5 : 5);
+
       } else if (event.key.toLowerCase() === 'f') {
         event.preventDefault();
         void togglePlayerFullscreenEvent();
@@ -2630,7 +2738,6 @@ export default function App() {
     exitPlayerFullscreenEvent,
     isNativeMpvSource,
     nativeFullscreen,
-    seekPlaybackByEvent,
     toggleNativeFullscreenEvent,
     togglePlayerFullscreenEvent,
     videoSource,
@@ -3633,7 +3740,8 @@ export default function App() {
       return;
     }
 
-    const playbackMs = currentPlaybackTime * 1000 - syncOffsetMs;
+    const playbackTime = isNativeMpvSource ? mpvTimePos : videoElementRef.current?.currentTime ?? 0;
+    const playbackMs = playbackTime * 1000 - syncOffsetMs;
     const nextCueIndex = findActiveCueIndex(subtitleTrack.cues, playbackMs);
     setActiveCueIndex((currentCueIndex) =>
       currentCueIndex === nextCueIndex ? currentCueIndex : nextCueIndex,
@@ -4506,10 +4614,12 @@ export default function App() {
           container: '.player-frame',
         },
       });
+      setBrowserControls(playerFrameRef.current?.querySelector<HTMLElement>('.plyr__controls') ?? null);
     });
 
     return () => {
       active = false;
+      setBrowserControls(null);
       playerRef.current?.destroy();
       playerRef.current = null;
     };
@@ -4716,6 +4826,11 @@ export default function App() {
 
     const handleVolumeChange = () => {
       storeVolume(videoElement.volume);
+      const previous = browserVolumeFeedbackRef.current;
+      browserVolumeFeedbackRef.current = { volume: videoElement.volume, muted: videoElement.muted };
+      if (previous.volume !== videoElement.volume || previous.muted !== videoElement.muted) {
+        showPlaybackFeedbackEvent(videoElement.muted ? 'VOL OFF' : `VOL ${Math.round(videoElement.volume * 100)}%`);
+      }
     };
 
     const handleLoadedMetadata = () => {
@@ -4727,6 +4842,7 @@ export default function App() {
         preservedPlaybackStateRef.current = null;
       } else {
         videoElement.volume = readStoredVolume();
+        videoElement.playbackRate = readStoredRate();
       }
 
       if (videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
@@ -4826,6 +4942,7 @@ export default function App() {
       videoElement.removeEventListener('volumechange', handleVolumeChange);
     };
   }, [
+    showPlaybackFeedbackEvent,
     autoplayOnOpen,
     autoLoadMatchingSubtitleEvent,
     capturePlaybackStateEvent,
@@ -4904,13 +5021,7 @@ export default function App() {
         }
       },
       seekBy: async (seconds) => seekPlaybackBy(seconds),
-      setRate: async (rate) => {
-        if (isNativeMpvSource) {
-          await setMpvProperty('speed', rate);
-        } else if (videoElementRef.current) {
-          videoElementRef.current.playbackRate = rate;
-        }
-      },
+      setRate: changeRate,
       setVolume: async (volume) => {
         storeVolume(volume);
         if (isNativeMpvSource) {
@@ -5232,7 +5343,7 @@ export default function App() {
             <div className={`player-card ${isNativeMpvSource ? 'player-card-native' : ''}`}>
               <div
                 ref={playerFrameRef}
-                className={`player-frame ${isNativeMpvSource ? 'player-frame-native' : ''} ${
+                className={`player-frame ${pointerHidden ? 'pointer-hidden' : ''} ${isNativeMpvSource ? 'player-frame-native' : ''} ${
                   playbackControlsVisible
                     ? 'playback-controls-visible'
                     : 'playback-controls-hidden'
@@ -5244,8 +5355,8 @@ export default function App() {
                 style={playerFrameStyle}
                 onClick={handlePlayerClick}
                 onDoubleClick={handlePlayerDoubleClick}
-                onPointerEnter={revealPlaybackControls}
-                onPointerMove={revealPlaybackControls}
+                onPointerEnter={revealPointer}
+                onPointerMove={revealPointer}
                 onPointerLeave={() => schedulePlaybackControlsHide(1800)}
                 onFocusCapture={revealPlaybackControls}
               >
@@ -5266,17 +5377,23 @@ export default function App() {
                 {!isNativeMpvSource ? (
                   <div className='browser-plugin-controls' data-player-control>
                     <PluginSlot name='player.controls.left' className='plugin-slot-inline' />
+
                     <PluginSlot name='player.controls.right' className='plugin-slot-inline' />
                   </div>
                 ) : null}
+                {browserControls ? createPortal(<div className='playback-rate-controls' data-player-control>
+                      <button type='button' aria-label='Speed -0.1 (S)' title='S' onClick={() => void handleAdjustment('rate-down')}>−</button>
+                      <button type='button' aria-label='Reset speed (R)' title='R' onClick={() => void handleAdjustment('rate-reset')}>{preferredRate.toFixed(1)}×</button>
+                      <button type='button' aria-label='Speed +0.1 (D)' title='D' onClick={() => void handleAdjustment('rate-up')}>+</button>
+                    </div>, browserControls) : null}
                 <audio ref={externalAudioRef} className='hidden-audio' preload='auto' />
 
                 {isNativeMpvSource ? (
                   <div
                     className='playback-activity-surface'
                     aria-hidden='true'
-                    onPointerEnter={revealPlaybackControls}
-                    onPointerMove={revealPlaybackControls}
+                    onPointerEnter={revealPointer}
+                    onPointerMove={revealPointer}
                     onPointerLeave={() => schedulePlaybackControlsHide(1800)}
                   />
                 ) : null}
@@ -5290,14 +5407,15 @@ export default function App() {
 
                 {playbackFeedback ? (
                   <div
-                    className={`playback-feedback playback-feedback-${playbackFeedback}`}
-                    aria-hidden='true'
+                    key={feedbackRevisionRef.current}
+                    className={`playback-feedback ${['play', 'pause'].includes(playbackFeedback) ? '' : 'playback-feedback-text'}`}
+                    role='status'
                   >
                     {playbackFeedback === 'play' ? (
                       <Play size={34} strokeWidth={2.2} />
-                    ) : (
+                    ) : playbackFeedback === 'pause' ? (
                       <Pause size={34} strokeWidth={2.2} />
-                    )}
+                    ) : playbackFeedback}
                   </div>
                 ) : null}
 
@@ -5357,7 +5475,7 @@ export default function App() {
                       aria-label={mpvMuted ? 'Unmute' : 'Mute'}
                       title={mpvMuted ? 'Unmute' : 'Mute'}
                       onClick={() =>
-                        void setMpvProperty('mute', !mpvMuted).catch(() => undefined)
+                        void toggleMute().catch(console.error)
                       }
                     >
                       {mpvMuted ? (
@@ -5378,10 +5496,7 @@ export default function App() {
                       aria-label='Volume'
                       onChange={(event) => {
                         const nextVolume = Number(event.target.value);
-                        storeVolume(nextVolume);
-                        void setMpvProperty('volume', nextVolume * 100).catch(
-                          () => undefined,
-                        );
+                        void changeVolume(nextVolume).catch(console.error);
                       }}
                     />
                     <button
@@ -5398,6 +5513,11 @@ export default function App() {
                         <Maximize2 size={20} strokeWidth={2.2} aria-hidden='true' />
                       )}
                     </button>
+                    <div className='playback-rate-controls' data-player-control>
+                      <button type='button' aria-label='Speed -0.1 (S)' title='S' onClick={() => void handleAdjustment('rate-down')}>−</button>
+                      <button type='button' aria-label='Reset speed (R)' title='R' onClick={() => void handleAdjustment('rate-reset')}>{preferredRate.toFixed(1)}×</button>
+                      <button type='button' aria-label='Speed +0.1 (D)' title='D' onClick={() => void handleAdjustment('rate-up')}>+</button>
+                    </div>
                     <PluginSlot name='player.controls.right' className='plugin-slot-inline' />
                   </div>
                 ) : null}
@@ -5413,7 +5533,7 @@ export default function App() {
                   onClick={(event) => event.stopPropagation()}
                   onDoubleClick={(event) => event.stopPropagation()}
                 >
-                  {activeCue ? (
+                  {subtitlesVisible && activeCue ? (
                     <span
                       className='caption-text'
                       dangerouslySetInnerHTML={{ __html: activeCue.html }}
