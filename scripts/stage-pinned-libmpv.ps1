@@ -14,12 +14,14 @@ if ($manifest.schemaVersion -ne 1 -or $manifest.target -ne "windows-x86_64") {
 # silently invalidate the manifest's pinned SHA-256 values.
 $wrapperUrl = "https://github.com/nini22P/libmpv-wrapper/releases/download/v0.1.1/libmpv-wrapper-windows-x86_64.zip"
 $wrapperSha256 = "D2FF8B2EDCD34D2968E544ADAA915E5E5C48EB1A0995945005269C2AF119A492"
-$mpvUrl = "https://github.com/zhongfly/mpv-winbuild/releases/download/2026-08-07-dd5d17d328/mpv-dev-lgpl-x86_64-20260807-git-dd5d17d328.7z"
-$mpvSha256 = "73A8023D5955DDC425EA35DFD749E2CC7CDAFC0B831AF4B8890EDA0C862942D9"
+# The upstream daily build was removed. Our published installer contains the
+# identical DLL, independently checked against native-runtime-manifest.json.
+$mpvUrl = "https://github.com/neura-neura/noir-player/releases/download/v0.1.16/Noir.Player_0.1.16_x64-setup.exe"
+$mpvSha256 = "F4A82A27FF8C69EFAB4A3F2FBE7C1234398E100A96FCE253CF5F35DBB73CF7DD"
 
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("noir-libmpv-" + [guid]::NewGuid().ToString("N"))
 $wrapperArchive = Join-Path $tempRoot "libmpv-wrapper.zip"
-$mpvArchive = Join-Path $tempRoot "mpv-dev.7z"
+$mpvArchive = Join-Path $tempRoot "noir-runtime-source.exe"
 $wrapperExtract = Join-Path $tempRoot "wrapper"
 $mpvExtract = Join-Path $tempRoot "mpv"
 $targetDirectory = Join-Path $repoRoot "src-tauri/lib"
