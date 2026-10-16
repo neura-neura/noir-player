@@ -1,0 +1,7 @@
+WEBVTT
+
+00:00.100 --> 00:04.000 align:start position:10%
+Hola <00:01.000><c>mundo</c> <00:02.000>otra <00:03.000>vez
+
+00:04.000 --> 00:06.000
+Una frase sin tiempos por palabra.

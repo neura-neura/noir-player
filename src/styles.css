@@ -1549,10 +1549,122 @@ input[type='color'] {
   padding: var(--subtitle-padding-y) var(--subtitle-padding-x);
   border-radius: var(--subtitle-radius);
   text-shadow: var(--subtitle-shadow);
+  -webkit-text-stroke: var(--subtitle-outline-width, 0px) var(--subtitle-outline-color, #000000);
+  paint-order: stroke fill;
   text-rendering: geometricPrecision;
   user-select: text;
   white-space: pre-wrap;
   pointer-events: auto;
+}
+
+.style-library .helper-text {
+  margin: 8px 0 12px;
+}
+
+.saved-style-list {
+  display: grid;
+  gap: 8px;
+}
+
+.saved-style-row {
+  border: 1px solid rgb(255 255 255 / 0.12);
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgb(255 255 255 / 0.025);
+}
+
+.saved-style-row-active {
+  border-color: #53c8fa;
+  background: rgb(83 200 250 / 0.08);
+}
+
+.saved-style-apply {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 64px;
+  padding: 10px 12px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.saved-style-apply > span:last-child {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.saved-style-apply small {
+  color: #acb9c9;
+}
+
+.saved-style-swatch {
+  display: grid;
+  place-items: center;
+  flex: 0 0 44px;
+  height: 40px;
+  border-radius: 6px;
+  font-size: 23px;
+}
+
+.saved-style-actions,
+.saved-style-actions form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.saved-style-actions {
+  padding: 0 12px 12px;
+}
+
+.saved-style-actions .mini-button {
+  min-height: 36px;
+}
+
+.saved-style-actions input {
+  width: 100%;
+}
+
+.saved-style-create,
+.saved-style-create label {
+  display: grid;
+  gap: 8px;
+}
+
+.saved-style-create {
+  margin-top: 14px;
+}
+
+.saved-style-create label {
+  font-size: 13px;
+}
+
+.saved-style-apply:focus-visible,
+.saved-style-actions button:focus-visible {
+  outline: 2px solid #53c8fa;
+  outline-offset: -3px;
+}
+
+.caption-text-progressive {
+  display: inline-grid;
+  text-align: left;
+}
+
+.caption-text-progressive > span {
+  grid-area: 1 / 1;
+  min-width: 0;
+}
+
+.caption-measure {
+  visibility: hidden;
+  user-select: none;
+  pointer-events: none;
 }
 
 .caption-text *,

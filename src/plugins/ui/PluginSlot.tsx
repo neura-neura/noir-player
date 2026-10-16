@@ -34,7 +34,7 @@ class ContributionBoundary extends Component<ContributionBoundaryProps, Contribu
 export function PluginSlot({ name, className }: { readonly name: PluginSlotName; readonly className?: string }) {
   const runtime = usePluginRuntime();
   const snapshot = useSyncExternalStore(runtime.player.subscribe.bind(runtime.player), runtime.player.getSnapshot.bind(runtime.player));
-  const uiRevision = useSyncExternalStore(runtime.ui.subscribe.bind(runtime.ui), () => runtime.ui.getRevision());
+  useSyncExternalStore(runtime.ui.subscribe.bind(runtime.ui), () => runtime.ui.getRevision());
   const contributions = runtime.ui.getContributions(name, snapshot);
   if (contributions.length === 0) return null;
   return (
@@ -42,7 +42,6 @@ export function PluginSlot({ name, className }: { readonly name: PluginSlotName;
       {contributions.map((contribution) => (
         <ContributionBoundary key={contribution.id} contribution={contribution} snapshot={snapshot} />
       ))}
-      <span className='sr-only' aria-hidden='true'>{uiRevision}</span>
     </div>
   );
 }

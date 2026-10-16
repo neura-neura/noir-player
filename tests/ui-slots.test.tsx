@@ -31,7 +31,7 @@ describe('nominal React plugin slots', () => {
     );
     expect(screen.getByText('early')).toBeInTheDocument();
     expect(screen.getByText('late')).toBeInTheDocument();
-    expect(container.textContent).toMatch(/earlylate/);
+    expect(container.textContent).toBe('earlylate');
   });
 
   it('isolates a broken contribution with an accessible status fallback', () => {

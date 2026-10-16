@@ -4,6 +4,8 @@ import type { CSSProperties, DragEvent, MouseEvent } from 'react';
 import { type EventCallback, type UnlistenFn } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import DOMPurify from 'dompurify';
+import { SubtitleStyleLibrary, subtitleStyleCopy } from '@/app/SubtitleStyleLibrary';
+import { DEFAULT_STYLE, DEFAULT_FONT_STYLESHEET_URL, normalizeSubtitleStyle, type SubtitleStyle, type SubtitleStyleSnapshot } from '@/lib/subtitle-styles';
 import type Hls from 'hls.js';
 import {
   Maximize2,
@@ -27,9 +29,11 @@ import {
 } from 'tauri-plugin-libmpv-api';
 import {
   findActiveCueIndex,
+  getSubtitleCueHtml,
   formatMillisecondsAsSeconds,
   loadSubtitleTrack,
   parseSubtitleText,
+  parseSubtitleCueText,
   SubtitleLoadError,
   type SubtitleTrack,
 } from '@/lib/subtitles';
@@ -92,24 +96,6 @@ type VideoOpenOptions = {
 type SubtitleSelectionOptions = {
   automatic?: boolean;
   expectedVideoPath?: string;
-};
-
-type SubtitleStyle = {
-  fontSize: number;
-  textColor: string;
-  backgroundColor: string;
-  backgroundOpacity: number;
-  bottomOffset: number;
-  fontWeight: number;
-  fontFamily: string;
-  useCustomMaxWidth: boolean;
-  maxWidth: number;
-  paddingX: number;
-  paddingY: number;
-  borderRadius: number;
-  lineHeight: number;
-  letterSpacing: number;
-  textShadow: boolean;
 };
 
 type NativeSubtitleDisplayMode = 'overlay' | 'native';
@@ -251,7 +237,6 @@ const MAX_SYNC_OFFSET_MS = 120_000;
 const FONTS_PER_PAGE = 10;
 const LEGACY_DEFAULT_FONT_STYLESHEET_URL =
   'https://cdn.jsdelivr.net/npm/gotham-pro-font@1.0.0/fonts.min.css';
-const DEFAULT_FONT_STYLESHEET_URL = '/vendor/gotham-pro-font/fonts.min.css';
 const FONT_STYLESHEET_LINK_ID = 'subtitle-font-stylesheet';
 const TOAST_DURATION_MS = 3_600;
 const INJECTED_SUBTITLE_TRACK_PREFIX = '__noir-player-track__';
@@ -260,26 +245,6 @@ const CURRENT_STYLE_PRESET_VERSION = 'gotham-classic-v1';
 
 const LEGACY_INTER_DEFAULT_FONT_FAMILY =
   "'Inter Variable', 'Inter', 'Segoe UI Variable Text', 'Segoe UI', sans-serif";
-const DEFAULT_SUBTITLE_FONT_FAMILY = 'GothamPro, sans-serif';
-
-const DEFAULT_STYLE: SubtitleStyle = {
-  fontSize: 38,
-  textColor: '#ffffff',
-  backgroundColor: '#000000',
-  backgroundOpacity: 0.23,
-  bottomOffset: 4,
-  fontWeight: 500,
-  fontFamily: DEFAULT_SUBTITLE_FONT_FAMILY,
-  useCustomMaxWidth: false,
-  maxWidth: 78,
-  paddingX: 12,
-  paddingY: 8,
-  borderRadius: 8,
-  lineHeight: 1.18,
-  letterSpacing: 0.2,
-  textShadow: true,
-};
-
 function getBaseName(path: string): string {
   return path.split(/[\\/]/).pop() || path;
 }
@@ -395,10 +360,7 @@ function readStoredStyle(): SubtitleStyle {
     }
 
     const parsed = JSON.parse(rawValue) as Partial<SubtitleStyle>;
-    const nextStyle = {
-      ...DEFAULT_STYLE,
-      ...parsed,
-    };
+    const nextStyle = normalizeSubtitleStyle(parsed);
     if (nextStyle.fontFamily === LEGACY_INTER_DEFAULT_FONT_FAMILY) {
       nextStyle.fontFamily = DEFAULT_STYLE.fontFamily;
     }
@@ -978,6 +940,7 @@ export default function App() {
     null,
   );
   const [activeCueIndex, setActiveCueIndex] = useState(-1);
+  const [activeCueHtml, setActiveCueHtml] = useState('');
   const [videoAspectRatio, setVideoAspectRatio] = useState<number | null>(null);
   const [panelVisible, setPanelVisible] = useState(false);
   const [pluginManagerVisible, setPluginManagerVisible] = useState(false);
@@ -1257,6 +1220,8 @@ export default function App() {
     '--subtitle-radius': `${subtitleStyle.borderRadius}px`,
     '--subtitle-line-height': String(subtitleStyle.lineHeight),
     '--subtitle-letter-spacing': `${subtitleStyle.letterSpacing}px`,
+    '--subtitle-outline-width': `${subtitleStyle.outlineWidth * 2}px`,
+    '--subtitle-outline-color': subtitleStyle.outlineColor,
     '--subtitle-shadow': subtitleStyle.textShadow
       ? 'rgb(0 0 0) 0 0 7px, rgb(0 0 0 / 0.8) 0 0 18px'
       : 'none',
@@ -2323,6 +2288,16 @@ export default function App() {
     }
   }
 
+  async function applySavedSubtitleStyle(snapshot: SubtitleStyleSnapshot) {
+    if (snapshot.fontStylesheetUrl) {
+      await loadRemoteFontStylesheet(snapshot.fontStylesheetUrl, { quiet: true, selectFirstFamily: false });
+    } else {
+      disableActiveFontStylesheet({ quiet: true });
+      setFontStylesheetInput('');
+    }
+    setSubtitleStyle({ ...snapshot.style });
+  }
+
   async function loadRemoteFontStylesheet(
     rawUrl: string,
     options?: {
@@ -2875,7 +2850,7 @@ export default function App() {
       ['sub-back-color', toMpvColor(subtitleStyle.backgroundColor, backgroundOpacity)],
       [
         'sub-outline-color',
-        toMpvColor(subtitleStyle.backgroundColor, Math.max(backgroundOpacity, 0.35)),
+        toMpvColor(subtitleStyle.outlineColor),
       ],
       [
         'sub-shadow-color',
@@ -2885,7 +2860,7 @@ export default function App() {
         'sub-border-style',
         backgroundOpacity > 0 ? 'background-box' : 'outline-and-shadow',
       ],
-      ['sub-outline-size', clamp(subtitleStyle.paddingX / 8, 0, 16)],
+      ['sub-outline-size', subtitleStyle.outlineWidth],
       [
         'sub-shadow-offset',
         subtitleStyle.textShadow ? clamp(subtitleStyle.paddingY / 3, 0, 12) : 0,
@@ -3307,11 +3282,11 @@ export default function App() {
 
     const cues = await waitForEmbeddedTrackCues(embeddedTrack);
     const mappedCues = cues
-      .map((cue) => ({
-        startMs: Math.round(cue.startTime * 1000),
-        endMs: Math.round(cue.endTime * 1000),
-        html: nativeCueToHtml(cue),
-      }))
+      .map((cue) => parseSubtitleCueText(
+        typeof (cue as VTTCue).text === 'string' ? (cue as VTTCue).text : nativeCueToHtml(cue),
+        Math.round(cue.startTime * 1000),
+        Math.round(cue.endTime * 1000),
+      ))
       .filter((cue) => cue.html && cue.endMs > cue.startMs);
 
     if (!mappedCues.length) {
@@ -3737,12 +3712,17 @@ export default function App() {
   function updateSubtitleCue() {
     if (!subtitleTrack) {
       setActiveCueIndex(-1);
+      setActiveCueHtml('');
       return;
     }
 
     const playbackTime = isNativeMpvSource ? mpvTimePos : videoElementRef.current?.currentTime ?? 0;
     const playbackMs = playbackTime * 1000 - syncOffsetMs;
     const nextCueIndex = findActiveCueIndex(subtitleTrack.cues, playbackMs);
+    const nextHtml = nextCueIndex >= 0
+      ? getSubtitleCueHtml(subtitleTrack.cues[nextCueIndex], playbackMs)
+      : '';
+    setActiveCueHtml((currentHtml) => currentHtml === nextHtml ? currentHtml : nextHtml);
     setActiveCueIndex((currentCueIndex) =>
       currentCueIndex === nextCueIndex ? currentCueIndex : nextCueIndex,
     );
@@ -5533,11 +5513,15 @@ export default function App() {
                   onClick={(event) => event.stopPropagation()}
                   onDoubleClick={(event) => event.stopPropagation()}
                 >
-                  {subtitlesVisible && activeCue ? (
+                  {subtitlesVisible && activeCue && activeCueHtml ? (
                     <span
-                      className='caption-text'
-                      dangerouslySetInnerHTML={{ __html: activeCue.html }}
-                    />
+                      className={`caption-text${activeCue.reveals ? ' caption-text-progressive' : ''}`}
+                    >
+                      {activeCue.reveals ? (
+                        <span className='caption-measure' aria-hidden='true' dangerouslySetInnerHTML={{ __html: activeCue.html }} />
+                      ) : null}
+                      <span className='caption-visible' dangerouslySetInnerHTML={{ __html: activeCueHtml }} />
+                    </span>
                   ) : null}
                 </div>
 
@@ -5861,6 +5845,11 @@ export default function App() {
                   ) : (
                     <div className='panel-body settings-container'>
                       <PluginSlot name='settings.sections' className='plugin-slot-settings' />
+                      <SubtitleStyleLibrary
+                        current={{ style: subtitleStyle, fontStylesheetUrl }}
+                        locale={language}
+                        onApply={applySavedSubtitleStyle}
+                      />
                       <section className='settings-section'>
                         <div className='section-heading'>
                           <h3>{messages.behavior.title}</h3>
@@ -6287,7 +6276,6 @@ export default function App() {
                       <section className='settings-section'>
                         <div className='section-heading'>
                           <h3>{messages.style.title}</h3>
-                          <strong>{messages.style.preset}</strong>
                         </div>
 
                         <div className='settings-item'>
@@ -6505,6 +6493,25 @@ export default function App() {
                                 }))
                               }
                             />
+                          </div>
+                        </div>
+
+                        <div className='settings-item'>
+                          <span>{subtitleStyleCopy(language).outline}</span>
+                          <div className='settings-item-content slider-editor'>
+                            <input type='range' aria-label={subtitleStyleCopy(language).outline} min={0} max={8} step={0.1}
+                              value={subtitleStyle.outlineWidth}
+                              onChange={(event) => setSubtitleStyle((style) => ({ ...style, outlineWidth: Number(event.target.value) }))} />
+                            <NumberField value={subtitleStyle.outlineWidth} min={0} max={8} step={0.1} unit='px'
+                              onCommit={(outlineWidth) => setSubtitleStyle((style) => ({ ...style, outlineWidth }))} />
+                          </div>
+                        </div>
+                        <div className='settings-item'>
+                          <span>{subtitleStyleCopy(language).outlineColor}</span>
+                          <div className='settings-item-content color-editor'>
+                            <input type='color' aria-label={subtitleStyleCopy(language).outlineColor} value={subtitleStyle.outlineColor}
+                              onChange={(event) => setSubtitleStyle((style) => ({ ...style, outlineColor: event.target.value }))} />
+                            <code>{subtitleStyle.outlineColor}</code>
                           </div>
                         </div>
 

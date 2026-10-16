@@ -6,6 +6,7 @@ export type SubtitleCue = {
   startMs: number;
   endMs: number;
   html: string;
+  reveals?: Array<{ startMs: number; html: string }>;
 };
 
 export type SubtitleTrack = {
@@ -119,8 +120,7 @@ function stripUnsupportedCueMarkup(rawText: string): string {
     .replace(/<\/v>/gi, '')
     .replace(/<lang(\s+[^>]*)?>/gi, '')
     .replace(/<\/lang>/gi, '')
-    .replace(/<\d{2}:\d{2}:\d{2}\.\d{3}>/g, '')
-    .replace(/<\/?\d{2}:\d{2}:\d{2}\.\d{3}>/g, '');
+    .replace(/<\/?(?:\d{2,}:)?\d{2}:\d{2}\.\d{3}>/g, '');
 }
 
 function sanitizeCueHtml(rawText: string): string {
@@ -165,6 +165,39 @@ function parseMilliseconds(rawValue: string): number {
   );
 }
 
+// Keep absolute WebVTT word times. Each prefix is sanitized independently so
+// formatting spanning a timestamp stays balanced and untrusted markup stays inert.
+export function parseSubtitleCueText(
+  rawText: string,
+  startMs: number,
+  endMs: number,
+): SubtitleCue {
+  const text = rawText.replace(/\r\n?/g, '\n').replace(/\n/g, '<br />');
+  const html = sanitizeCueHtml(text);
+  const reveals: NonNullable<SubtitleCue['reveals']> = [];
+  let previousMs = startMs;
+  for (const match of text.matchAll(/<((?:\d{2,}:)?\d{2}:\d{2}\.\d{3})>/g)) {
+    const timestamp = parseMilliseconds(match[1]);
+    if (timestamp <= previousMs || timestamp >= endMs) continue;
+    reveals.push({ startMs: previousMs, html: sanitizeCueHtml(text.slice(0, match.index)) });
+    previousMs = timestamp;
+  }
+  if (reveals.length) {
+    reveals.push({ startMs: previousMs, html });
+    return { startMs, endMs, html, reveals };
+  }
+  return { startMs, endMs, html };
+}
+
+export function getSubtitleCueHtml(cue: SubtitleCue, playbackMs: number): string {
+  if (playbackMs < cue.startMs || playbackMs >= cue.endMs) return '';
+  if (!cue.reveals) return cue.html;
+  for (let index = cue.reveals.length - 1; index >= 0; index -= 1) {
+    if (playbackMs >= cue.reveals[index].startMs) return cue.reveals[index].html;
+  }
+  return '';
+}
+
 function parseCueBlock(block: string): SubtitleCue | null {
   const lines = block
     .split('\n')
@@ -190,17 +223,13 @@ function parseCueBlock(block: string): SubtitleCue | null {
 
   const startMs = parseMilliseconds(rawStart);
   const endMs = parseMilliseconds(rawEnd);
-  const html = sanitizeCueHtml(lines.slice(timeLineIndex + 1).join('<br />'));
+  const cue = parseSubtitleCueText(lines.slice(timeLineIndex + 1).join('\n'), startMs, endMs);
 
-  if (!html || endMs <= startMs) {
+  if (!cue.html || endMs <= startMs) {
     return null;
   }
 
-  return {
-    startMs,
-    endMs,
-    html,
-  };
+  return cue;
 }
 
 function splitAssFields(rawValue: string, expectedFieldCount: number): string[] {
@@ -329,11 +358,22 @@ export function parseSubtitleText(
     return [];
   }
 
-  return normalized
+  const blocks = normalized
     .replace(/\n{3,}/g, '\n\n')
-    .split('\n\n')
-    .map((block) => parseCueBlock(block))
-    .filter((cue): cue is SubtitleCue => Boolean(cue));
+    .split('\n\n');
+  const cues: SubtitleCue[] = [];
+  for (let index = 0; index < blocks.length; index += 1) {
+    let block = blocks[index];
+    // FFmpeg can retain a leading blank line from an MP4 mov_text payload.
+    // Rejoin that payload, without consuming the next timed cue or metadata.
+    if (/-->[^\n]*$/.test(block) && blocks[index + 1] &&
+      !/-->|^(?:NOTE|STYLE|REGION)(?:\s|$)/.test(blocks[index + 1])) {
+      block += `\n${blocks[++index]}`;
+    }
+    const cue = parseCueBlock(block);
+    if (cue) cues.push(cue);
+  }
+  return cues;
 }
 
 async function readFileBuffer(file: File): Promise<Uint8Array> {
@@ -395,7 +435,7 @@ export function findActiveCueIndex(
       continue;
     }
 
-    if (playbackMs > cue.endMs) {
+    if (playbackMs >= cue.endMs) {
       start = middle + 1;
       continue;
     }
