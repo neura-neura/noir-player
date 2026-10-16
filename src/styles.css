@@ -23,6 +23,16 @@ body,
 body {
   min-height: 100vh;
   overflow-x: clip;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input,
+textarea,
+[contenteditable='true'],
+[contenteditable='plaintext-only'] {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 button,
@@ -1552,7 +1562,7 @@ input[type='color'] {
   -webkit-text-stroke: var(--subtitle-outline-width, 0px) var(--subtitle-outline-color, #000000);
   paint-order: stroke fill;
   text-rendering: geometricPrecision;
-  user-select: text;
+  user-select: none;
   white-space: pre-wrap;
   pointer-events: auto;
 }
