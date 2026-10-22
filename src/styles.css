@@ -1241,6 +1241,10 @@ body:has(.app-shell-native-fullscreen),
   text-align: left;
 }
 .playlist-delete-button {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  touch-action: none;
   display: grid;
   place-items: center;
   width: 44px;
@@ -1249,6 +1253,19 @@ body:has(.app-shell-native-fullscreen),
   border-radius: 12px;
   background: transparent;
   color: var(--delete-color, #ffb4b4);
+}
+.playlist-delete-fill {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--delete-color, #ffb4b4);
+  opacity: 0.3;
+  transform: scaleX(0);
+  transform-origin: left;
+}
+.playlist-delete-holding .playlist-delete-fill {
+  transform: scaleX(1);
+  transition: transform var(--delete-hold-duration) linear;
 }
 .playlist-delete-button:hover { background: rgba(255, 100, 100, 0.14); }
 .playlist-play-button:focus-visible,
@@ -1272,8 +1289,6 @@ body:has(.app-shell-native-fullscreen),
 .delete-video-dialog p { margin: 12px 0; overflow-wrap: anywhere; }
 .delete-video-symbol, .delete-video-error { color: var(--delete-color); }
 .delete-video-filename { font-weight: 600; }
-.delete-video-checkbox { display: flex; align-items: center; gap: 8px; min-height: 44px; }
-.delete-video-checkbox input { width: 18px; height: 18px; accent-color: #6fe1ff; }
 .delete-video-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .delete-video-actions button { min-height: 44px; padding: 8px 16px; border-radius: 12px; }
 .delete-video-confirm { border: 1px solid var(--delete-color); background: #713136; color: #fff0f0; }

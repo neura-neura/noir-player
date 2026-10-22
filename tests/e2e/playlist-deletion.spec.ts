@@ -43,20 +43,19 @@ test.beforeEach(async ({ page }) => {
   await expect(page.locator('.playlist-item')).toHaveCount(2);
 });
 
-test('cancels, confirms, shows progress, refreshes the list and remembers the opt-out', async ({ page }) => {
+test('always confirms normal clicks, ignores old preferences and refreshes the list', async ({ page }) => {
+  await page.evaluate(() => localStorage.setItem('noir-player:skip-delete-confirmation', 'true'));
   const rows = page.locator('.playlist-item');
   await rows.nth(1).locator('.playlist-delete-button').click();
   await expect(page.getByRole('dialog')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
   await page.getByRole('button', { name: 'Confirm', exact: true }).focus();
   await page.keyboard.press('Tab');
-  await expect(page.getByRole('checkbox', { name: 'Do not ask again' })).toBeFocused();
-  await page.getByRole('checkbox', { name: 'Do not ask again' }).check();
+  await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeFocused();
+  await expect(page.getByRole('dialog').getByRole('checkbox')).toHaveCount(0);
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);
-  expect(await page.evaluate(() => localStorage.getItem('noir-player:skip-delete-confirmation'))).toBeNull();
   await rows.nth(1).locator('.playlist-delete-button').click();
-  await page.getByRole('checkbox', { name: 'Do not ask again' }).check();
   await page.getByRole('button', { name: 'Confirm', exact: true }).click();
   await expect(page.getByRole('progressbar')).toBeVisible();
   await page.keyboard.press('Escape');
@@ -65,14 +64,70 @@ test('cancels, confirms, shows progress, refreshes the list and remembers the op
   await page.evaluate(() => (window as unknown as { finishRecycle: () => void }).finishRecycle());
   await expect(rows).toHaveCount(1);
   await expect(rows.first()).toContainText('one.mp4');
-  expect(await page.evaluate(() => localStorage.getItem('noir-player:skip-delete-confirmation'))).toBe('true');
   await rows.first().locator('.playlist-delete-button').click();
+  await expect(page.getByRole('button', { name: 'Confirm', exact: true })).toBeVisible();
+  await expect(page.getByRole('progressbar')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Confirm', exact: true }).click();
   await expect(page.getByRole('progressbar')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Confirm', exact: true })).toHaveCount(0);
   await page.evaluate(() => (window as unknown as { finishRecycle: () => void }).finishRecycle());
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(rows).toHaveCount(0);
   expect(await page.evaluate(() => (window as unknown as { recycled: string[] }).recycled)).toHaveLength(2);
+});
+
+test('fills the button during a one-second hold and recycles without confirmation', async ({ page }) => {
+  const button = page.locator('.playlist-delete-button').nth(1);
+  await button.hover();
+  await page.mouse.down();
+  await expect(button).toHaveClass(/playlist-delete-holding/);
+  await expect.poll(async () => button.locator('.playlist-delete-fill').evaluate((fill) =>
+    new DOMMatrix(getComputedStyle(fill).transform).a,
+  )).toBeGreaterThan(0.2);
+  await page.screenshot({ path: 'test-results/playlist-delete-hold-fill.png' });
+  await expect(page.getByRole('progressbar')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Confirm', exact: true })).toHaveCount(0);
+  await page.mouse.up();
+  await page.evaluate(() => (window as unknown as { finishRecycle: () => void }).finishRecycle());
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('.playlist-item')).toHaveCount(1);
+  expect(await page.evaluate(() => (window as unknown as { recycled: string[] }).recycled)).toEqual(['C:\\Videos\\two.mp4']);
+  // A normal click on the remaining video still opens confirmation.
+  await page.locator('.playlist-delete-button').click();
+  await expect(page.getByRole('button', { name: 'Confirm', exact: true })).toBeVisible();
+});
+
+test('cancels holds on early release or leaving the button', async ({ page }) => {
+  await page.clock.install();
+  const button = page.locator('.playlist-delete-button').nth(1);
+  await button.hover();
+  await page.mouse.down();
+  await page.clock.runFor(500);
+  await page.mouse.up();
+  await expect(page.getByRole('button', { name: 'Confirm', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await button.hover();
+  await page.mouse.down();
+  await page.clock.runFor(500);
+  await page.mouse.move(0, 0);
+  await page.mouse.up();
+  await page.clock.runFor(1500);
+  await expect(button).not.toHaveClass(/playlist-delete-holding/);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as unknown as { recycled: string[] }).recycled)).toHaveLength(0);
+  const commands = await page.evaluate(() => (window as unknown as { nativeCalls: string[] }).nativeCalls);
+  expect(commands).not.toContain('recycle_video');
+});
+
+test('keyboard activation always opens confirmation', async ({ page }) => {
+  const button = page.locator('.playlist-delete-button').nth(1);
+  await button.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('button', { name: 'Confirm', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await button.focus();
+  await page.keyboard.press('Space');
+  await expect(page.getByRole('button', { name: 'Confirm', exact: true })).toBeVisible();
 });
 
 test('preserves the list on recycling errors and permits retry', async ({ page }) => {

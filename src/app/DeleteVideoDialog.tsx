@@ -1,9 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Trash2 } from 'lucide-react';
 import type { AppMessages } from '@/i18n';
-
-export const SKIP_DELETE_CONFIRMATION_KEY = 'noir-player:skip-delete-confirmation';
 
 export function DeleteVideoDialog({ fileName, messages, busy, error, onCancel, onConfirm }: {
   fileName: string;
@@ -11,11 +9,10 @@ export function DeleteVideoDialog({ fileName, messages, busy, error, onCancel, o
   busy: boolean;
   error: boolean;
   onCancel: () => void;
-  onConfirm: (skipConfirmation: boolean) => void;
+  onConfirm: () => void;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
-  const [skipConfirmation, setSkipConfirmation] = useState(false);
 
   useEffect(() => {
     const dialog = dialogRef.current!;
@@ -65,14 +62,9 @@ export function DeleteVideoDialog({ fileName, messages, busy, error, onCancel, o
       ) : (
         <>
           {error ? <p className='delete-video-error' role='alert'>{messages.deleteFailed}</p> : null}
-          <label className='delete-video-checkbox'>
-            <input type='checkbox' checked={skipConfirmation}
-              onChange={(event) => setSkipConfirmation(event.target.checked)} />
-            {messages.deleteSkipConfirmation}
-          </label>
           <div className='delete-video-actions'>
             <button ref={cancelRef} type='button' className='ghost-button' onClick={onCancel}>{messages.deleteCancel}</button>
-            <button type='button' className='delete-video-confirm' onClick={() => onConfirm(skipConfirmation)}>{messages.deleteConfirm}</button>
+            <button type='button' className='delete-video-confirm' onClick={onConfirm}>{messages.deleteConfirm}</button>
           </div>
         </>
       )}

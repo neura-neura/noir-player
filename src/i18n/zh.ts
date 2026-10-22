@@ -133,7 +133,7 @@ export const zh: AppMessages = {
     deleteDescription: '视频将移至回收站，你可以从回收站中恢复。',
     deleteConfirm: '确认',
     deleteCancel: '取消',
-    deleteSkipConfirmation: '不再询问',
+    deleteHoldHint: '点击以确认，或按住 1 秒直接移至回收站，无需确认。',
     deleting: '正在将视频移至回收站…',
     deleted: (fileName) => `${fileName} 已移至回收站。`,
     deleteFailed: '无法将视频移至回收站。请检查文件是否正被使用以及所在驱动器是否支持回收站，然后重试。',

@@ -11,19 +11,19 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe('video recycling confirmation', () => {
-  it.each(LOCALE_OPTIONS)('localizes confirmation and passes the opt-out only when confirming (%s)', (locale) => {
+  it.each(LOCALE_OPTIONS)('localizes confirmation without a persistent opt-out (%s)', (locale) => {
     const messages = MESSAGES[locale].playlist;
     const onCancel = vi.fn();
     const onConfirm = vi.fn();
     render(<DeleteVideoDialog fileName='movie.mkv' messages={messages} busy={false} error={false} onCancel={onCancel} onConfirm={onConfirm} />);
     expect(screen.getByRole('dialog', { name: messages.deleteTitle })).toBeVisible();
     expect(screen.getByRole('button', { name: messages.deleteCancel })).toHaveFocus();
-    fireEvent.click(screen.getByRole('checkbox', { name: messages.deleteSkipConfirmation }));
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: messages.deleteCancel }));
     expect(onCancel).toHaveBeenCalledOnce();
     expect(onConfirm).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: messages.deleteConfirm }));
-    expect(onConfirm).toHaveBeenCalledWith(true);
+    expect(onConfirm).toHaveBeenCalledOnce();
   });
 
   it('shows indeterminate progress and prevents dismissal while recycling', () => {

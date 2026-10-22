@@ -5,7 +5,8 @@ import { type EventCallback, type UnlistenFn } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import DOMPurify from 'dompurify';
 import { SubtitleStyleLibrary, subtitleStyleCopy } from '@/app/SubtitleStyleLibrary';
-import { DeleteVideoDialog, SKIP_DELETE_CONFIRMATION_KEY } from '@/app/DeleteVideoDialog';
+import { DeleteVideoDialog } from '@/app/DeleteVideoDialog';
+import { DeleteVideoButton } from '@/app/DeleteVideoButton';
 import { DEFAULT_STYLE, DEFAULT_FONT_STYLESHEET_URL, normalizeSubtitleStyle, type SubtitleStyle, type SubtitleStyleSnapshot } from '@/lib/subtitle-styles';
 import type Hls from 'hls.js';
 import {
@@ -13,7 +14,6 @@ import {
   Minimize2,
   Pause,
   Play,
-  Trash2,
   Volume2,
   VolumeX,
 } from 'lucide-react';
@@ -2676,6 +2676,7 @@ export default function App() {
 
     const handlePlaybackSpaceShortcut = (event: KeyboardEvent) => {
       if (document.querySelector('.delete-video-dialog[open]')) return;
+      if (event.target instanceof Element && event.target.closest('.playlist-delete-button')) return;
       if (!shouldHandlePlaybackSpace(event)) {
         return;
       }
@@ -3486,15 +3487,12 @@ export default function App() {
     }
   }
 
-  async function deletePlaylistVideo(target: PlaylistVideo, skipConfirmation = false) {
+  async function deletePlaylistVideo(target: PlaylistVideo) {
     if (deleteBusyRef.current) return;
     deleteBusyRef.current = true;
     setDeleteTarget(target);
     setDeleteBusy(true);
     setDeleteError(false);
-    if (skipConfirmation) {
-      try { window.localStorage.setItem(SKIP_DELETE_CONFIRMATION_KEY, 'true'); } catch { /* Storage is optional. */ }
-    }
     const deletingActive = areFilePathsEqual(target.path, currentVideoPathRef.current);
     const preservedPlaybackState = capturePlaybackState();
     let recycled = false;
@@ -3553,7 +3551,6 @@ export default function App() {
     if (deleteBusyRef.current) return;
     setDeleteError(false);
     setDeleteTarget(target);
-    if (readStoredBoolean(SKIP_DELETE_CONFIRMATION_KEY, false)) void deletePlaylistVideo(target);
   }
 
   async function playPlaylistVideo(playlistVideo: PlaylistVideo) {
@@ -5908,12 +5905,9 @@ export default function App() {
                                   {messages.playlist.play}
                                 </span>
                                 </button>
-                                <button type='button' className='playlist-delete-button'
-                                  title={messages.playlist.deleteVideo}
-                                  aria-label={`${messages.playlist.deleteVideo}: ${playlistVideo.fileName}`}
-                                  disabled={deleteBusy} onClick={() => requestDeleteVideo(playlistVideo)}>
-                                  <Trash2 size={18} aria-hidden='true' />
-                                </button>
+                                <DeleteVideoButton fileName={playlistVideo.fileName} messages={messages.playlist}
+                                  disabled={deleteBusy} onRequest={() => requestDeleteVideo(playlistVideo)}
+                                  onHold={() => void deletePlaylistVideo(playlistVideo)} />
                               </div>
                             );
                           })}
@@ -6886,7 +6880,7 @@ export default function App() {
         <DeleteVideoDialog key={deleteTarget.path} fileName={deleteTarget.fileName}
           messages={messages.playlist} busy={deleteBusy} error={deleteError}
           onCancel={() => setDeleteTarget(null)}
-          onConfirm={(skip) => void deletePlaylistVideo(deleteTarget, skip)} />
+          onConfirm={() => void deletePlaylistVideo(deleteTarget)} />
       ) : null}
 
       {toast ? (

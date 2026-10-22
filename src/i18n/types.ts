@@ -117,7 +117,7 @@ export type AppMessages = {
     deleteDescription: string;
     deleteConfirm: string;
     deleteCancel: string;
-    deleteSkipConfirmation: string;
+    deleteHoldHint: string;
     deleting: string;
     deleted: (fileName: string) => string;
     deleteFailed: string;

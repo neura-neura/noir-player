@@ -135,7 +135,7 @@ export const en: AppMessages = {
     deleteDescription: 'The video will be moved to the Recycle Bin. You can restore it from there.',
     deleteConfirm: 'Confirm',
     deleteCancel: 'Cancel',
-    deleteSkipConfirmation: 'Do not ask again',
+    deleteHoldHint: 'Click to confirm, or hold for 1 second to move to the Recycle Bin without confirmation.',
     deleting: 'Moving video to Recycle Bin…',
     deleted: (fileName) => `${fileName} was moved to the Recycle Bin.`,
     deleteFailed: 'Could not move the video to the Recycle Bin. Check that it is not in use and that its drive supports recycling, then try again.',

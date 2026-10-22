@@ -137,7 +137,7 @@ export const es: AppMessages = {
     deleteDescription: 'El video se enviará a la papelera de reciclaje. Podrás restaurarlo desde allí.',
     deleteConfirm: 'Confirmar',
     deleteCancel: 'Cancelar',
-    deleteSkipConfirmation: 'No volver a preguntar',
+    deleteHoldHint: 'Haz clic para confirmar o mantén presionado 1 segundo para enviar a la papelera sin confirmación.',
     deleting: 'Enviando video a la papelera de reciclaje…',
     deleted: (fileName) => `${fileName} se envió a la papelera de reciclaje.`,
     deleteFailed: 'No se pudo enviar el video a la papelera. Comprueba que no esté en uso y que la unidad admita la papelera de reciclaje e inténtalo de nuevo.',
