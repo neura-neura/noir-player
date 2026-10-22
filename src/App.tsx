@@ -5,6 +5,7 @@ import { type EventCallback, type UnlistenFn } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import DOMPurify from 'dompurify';
 import { SubtitleStyleLibrary, subtitleStyleCopy } from '@/app/SubtitleStyleLibrary';
+import { DeleteVideoDialog, SKIP_DELETE_CONFIRMATION_KEY } from '@/app/DeleteVideoDialog';
 import { DEFAULT_STYLE, DEFAULT_FONT_STYLESHEET_URL, normalizeSubtitleStyle, type SubtitleStyle, type SubtitleStyleSnapshot } from '@/lib/subtitle-styles';
 import type Hls from 'hls.js';
 import {
@@ -12,6 +13,7 @@ import {
   Minimize2,
   Pause,
   Play,
+  Trash2,
   Volume2,
   VolumeX,
 } from 'lucide-react';
@@ -936,6 +938,10 @@ export default function App() {
   const [playlistVideos, setPlaylistVideos] = useState<PlaylistVideo[]>([]);
   const [playlistLoading, setPlaylistLoading] = useState(false);
   const [playlistRefreshRevision, setPlaylistRefreshRevision] = useState(0);
+  const [deleteTarget, setDeleteTarget] = useState<PlaylistVideo | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState(false);
+  const deleteBusyRef = useRef(false);
   const [subtitleTrack, setSubtitleTrack] = useState<SubtitleTrack | null>(
     null,
   );
@@ -1433,6 +1439,7 @@ export default function App() {
   useEffect(() => {
     if (!videoSource) return;
     const listener = (event: KeyboardEvent) => {
+      if (document.querySelector('.delete-video-dialog[open]')) return;
       const action = playbackAdjustment(event);
       if (!action) return;
       event.preventDefault();
@@ -1503,6 +1510,7 @@ export default function App() {
     nextNotice: string,
     options?: VideoOpenOptions,
   ) {
+    if (deleteBusyRef.current) return;
     const nextPanelVisible = options?.panelVisible ?? shouldOpenPanelOnVideoReady;
     const shouldApplyOpenPreferences = options?.applyOpenPreferences ?? true;
     const storedAutoplayOnOpen = readStoredBoolean(
@@ -1567,6 +1575,7 @@ export default function App() {
     path: string,
     options?: VideoOpenOptions,
   ) {
+    if (deleteBusyRef.current) return;
     const fileName = getBaseName(path);
 
     try {
@@ -1913,6 +1922,7 @@ export default function App() {
   useEffect(() => {
     if (
       mpvStatus !== 'ready' ||
+      deleteBusyRef.current ||
       videoSource?.kind !== 'mpv' ||
       !videoSource.path
     ) {
@@ -2093,6 +2103,8 @@ export default function App() {
     ) {
       return;
     }
+
+    if (deleteBusyRef.current) return;
 
     if (endPlaybackAction === 'repeat') {
       void mpvCommand('seek', [0, 'absolute', 'exact'])
@@ -2663,6 +2675,7 @@ export default function App() {
     }
 
     const handlePlaybackSpaceShortcut = (event: KeyboardEvent) => {
+      if (document.querySelector('.delete-video-dialog[open]')) return;
       if (!shouldHandlePlaybackSpace(event)) {
         return;
       }
@@ -2686,6 +2699,7 @@ export default function App() {
     }
 
     const handleFullscreenShortcut = (event: KeyboardEvent) => {
+      if (document.querySelector('.delete-video-dialog[open]')) return;
       const target = event.target as HTMLElement | null;
       if (
         target?.isContentEditable ||
@@ -3472,7 +3486,78 @@ export default function App() {
     }
   }
 
+  async function deletePlaylistVideo(target: PlaylistVideo, skipConfirmation = false) {
+    if (deleteBusyRef.current) return;
+    deleteBusyRef.current = true;
+    setDeleteTarget(target);
+    setDeleteBusy(true);
+    setDeleteError(false);
+    if (skipConfirmation) {
+      try { window.localStorage.setItem(SKIP_DELETE_CONFIRMATION_KEY, 'true'); } catch { /* Storage is optional. */ }
+    }
+    const deletingActive = areFilePathsEqual(target.path, currentVideoPathRef.current);
+    const preservedPlaybackState = capturePlaybackState();
+    let recycled = false;
+    try {
+      if (deletingActive) {
+        playOnReadyRef.current = false;
+        if (isNativeMpvSource) await mpvCommand('stop');
+        resetMediaElementBeforeSourceSwap();
+      }
+      await invoke('recycle_video', { path: target.path });
+      recycled = true;
+      const remaining = playlistVideos.filter((video) => !areFilePathsEqual(video.path, target.path));
+      setPlaylistVideos(remaining);
+      setPlaylistRefreshRevision((revision) => revision + 1);
+      deleteBusyRef.current = false;
+      if (deletingActive) {
+        // Clear the removed source even if preparing the next video fails.
+        setVideoSource(null);
+        setSubtitleTrack(null);
+        setExternalAudioSource(null);
+        setNativeSubtitleTracks([]);
+        setNativeAudioTracks([]);
+        setActiveEmbeddedTrackId(null);
+        setActiveAudioTrackId(null);
+        setMpvTimePos(0);
+        setMpvDuration(0);
+        const index = playlistVideos.findIndex((video) => areFilePathsEqual(video.path, target.path));
+        const next = remaining[Math.min(index, remaining.length - 1)];
+        if (next) {
+          await openVideoFromPath(next.path, {
+            panelTab: 'playlist', panelVisible: true, playOnReady: false,
+            applyOpenPreferences: false, preservePlaybackState: preservedPlaybackState,
+          });
+        }
+      }
+      setNotice(messages.playlist.deleted(target.fileName));
+      pushToast(messages.playlist.deleted(target.fileName));
+      setDeleteTarget(null);
+    } catch (error) {
+      console.warn('[Noir playlist] recycling failed', error);
+      deleteBusyRef.current = false;
+      if (deletingActive && !recycled) {
+        await openVideoFromPath(target.path, {
+          panelTab: 'playlist', panelVisible: true, playOnReady: false,
+          applyOpenPreferences: false, preservePlaybackState: preservedPlaybackState,
+        });
+      }
+      setDeleteError(true);
+    } finally {
+      deleteBusyRef.current = false;
+      setDeleteBusy(false);
+    }
+  }
+
+  function requestDeleteVideo(target: PlaylistVideo) {
+    if (deleteBusyRef.current) return;
+    setDeleteError(false);
+    setDeleteTarget(target);
+    if (readStoredBoolean(SKIP_DELETE_CONFIRMATION_KEY, false)) void deletePlaylistVideo(target);
+  }
+
   async function playPlaylistVideo(playlistVideo: PlaylistVideo) {
+    if (deleteBusyRef.current) return;
     const preservedPlaybackState = capturePlaybackState();
     setPanelVisible(true);
     setPanelTab('playlist');
@@ -4772,6 +4857,7 @@ export default function App() {
     };
 
     const handleEnded = () => {
+      if (deleteBusyRef.current) return;
       if (endPlaybackAction === 'repeat') {
         videoElement.currentTime = 0;
         void videoElement.play().catch(() => {
@@ -5799,16 +5885,16 @@ export default function App() {
                             );
 
                             return (
-                              <button
+                              <div
                                 key={playlistVideo.path}
-                                type='button'
+                                role='listitem'
                                 className={`playlist-item ${
                                   isActive ? 'playlist-item-active' : ''
                                 }`}
-                                title={playlistVideo.path}
-                                aria-current={isActive ? 'true' : undefined}
-                                onClick={() => void playPlaylistVideo(playlistVideo)}
                               >
+                                <button type='button' className='playlist-play-button'
+                                  title={playlistVideo.path} aria-current={isActive ? 'true' : undefined}
+                                  disabled={deleteBusy} onClick={() => void playPlaylistVideo(playlistVideo)}>
                                 <span className='playlist-index'>
                                   {String(index + 1).padStart(2, '0')}
                                 </span>
@@ -5821,7 +5907,14 @@ export default function App() {
                                 <span className='playlist-action'>
                                   {messages.playlist.play}
                                 </span>
-                              </button>
+                                </button>
+                                <button type='button' className='playlist-delete-button'
+                                  title={messages.playlist.deleteVideo}
+                                  aria-label={`${messages.playlist.deleteVideo}: ${playlistVideo.fileName}`}
+                                  disabled={deleteBusy} onClick={() => requestDeleteVideo(playlistVideo)}>
+                                  <Trash2 size={18} aria-hidden='true' />
+                                </button>
+                              </div>
                             );
                           })}
                         </div>
@@ -6788,6 +6881,13 @@ export default function App() {
           </section>
         )}
       </main>
+
+      {deleteTarget ? (
+        <DeleteVideoDialog key={deleteTarget.path} fileName={deleteTarget.fileName}
+          messages={messages.playlist} busy={deleteBusy} error={deleteError}
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={(skip) => void deletePlaylistVideo(deleteTarget, skip)} />
+      ) : null}
 
       {toast ? (
         <div className='toast-notice' role='status' aria-live='polite'>

@@ -112,6 +112,15 @@ export type AppMessages = {
     unavailable: string;
     current: string;
     play: string;
+    deleteVideo: string;
+    deleteTitle: string;
+    deleteDescription: string;
+    deleteConfirm: string;
+    deleteCancel: string;
+    deleteSkipConfirmation: string;
+    deleting: string;
+    deleted: (fileName: string) => string;
+    deleteFailed: string;
     position: (currentIndex: number, totalCount: number) => string;
   };
   behavior: {

@@ -1071,6 +1071,29 @@ fn list_folder_videos(path: String) -> Result<Vec<PlaylistVideo>, String> {
     Ok(videos)
 }
 
+fn validate_recyclable_video(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if !path.is_absolute()
+        || !metadata.file_type().is_file()
+        || !path.extension().is_some_and(is_supported_video_extension)
+    {
+        return Err("Only absolute paths to regular video files can be recycled.".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn recycle_video(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = Path::new(&path);
+        validate_recyclable_video(path)?;
+        // Use the OS trash API; never fall back to permanent deletion.
+        trash::delete(path).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 fn probe_video_duration_seconds(app: &AppHandle, path: &str) -> Result<f64, String> {
     let ffprobe_path = resolve_binary_path(app, "ffprobe.exe");
     let output = hidden_command(ffprobe_path)
@@ -1639,6 +1662,7 @@ pub fn run() {
             open_devtools,
             list_system_fonts,
             list_folder_videos,
+            recycle_video,
             prepare_hls_stream,
             prepare_video_playback_source,
             list_embedded_subtitle_streams,
@@ -1690,6 +1714,58 @@ mod tests {
         assert!(!is_supported_external_subtitle_extension(OsStr::new("mp4")));
         assert!(is_transport_stream_path("episode.M2TS"));
         assert!(!is_transport_stream_path("episode.mp4"));
+    }
+
+    #[test]
+    fn recycling_rejects_directories_and_non_video_files() {
+        let suffix = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("noir-recycle-{suffix}"));
+        fs::create_dir(&directory).unwrap();
+        let video = directory.join("test.MKV");
+        let subtitle = directory.join("test.srt");
+        fs::write(&video, b"fixture").unwrap();
+        fs::write(&subtitle, b"fixture").unwrap();
+        assert!(validate_recyclable_video(&video).is_ok());
+        assert!(validate_recyclable_video(&directory).is_err());
+        assert!(validate_recyclable_video(&subtitle).is_err());
+        assert!(validate_recyclable_video(&directory.join("missing.mp4")).is_err());
+        // Remove only the fixtures created by this test, without recursive deletion.
+        fs::remove_file(video).unwrap();
+        fs::remove_file(subtitle).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn recycled_video_can_be_restored_from_windows_recycle_bin() {
+        let suffix = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("noir-recycle-restore-{suffix}"));
+        fs::create_dir(&directory).unwrap();
+        let video = directory.join("recycle-fixture.mp4");
+        fs::write(&video, b"recyclable video fixture").unwrap();
+        tauri::async_runtime::block_on(recycle_video(video.to_string_lossy().into_owned()))
+            .unwrap();
+        assert!(!video.exists());
+        let parent = fs::canonicalize(&directory).unwrap();
+        let items: Vec<_> = trash::os_limited::list()
+            .unwrap()
+            .into_iter()
+            .filter(|item| {
+                item.name == "recycle-fixture.mp4"
+                    && fs::canonicalize(&item.original_parent).ok().as_ref() == Some(&parent)
+            })
+            .collect();
+        assert_eq!(items.len(), 1);
+        trash::os_limited::restore_all(items).unwrap();
+        assert_eq!(fs::read(&video).unwrap(), b"recyclable video fixture");
+        fs::remove_file(video).unwrap();
+        fs::remove_dir(directory).unwrap();
     }
 
     #[test]
