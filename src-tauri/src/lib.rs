@@ -1761,6 +1761,10 @@ mod tests {
                 // fixture directory identifies this item regardless of Explorer settings.
                 fs::canonicalize(&item.original_parent).ok().as_ref() == Some(&parent)
             })
+            .map(|mut item| {
+                item.name = video.file_name().unwrap().to_owned();
+                item
+            })
             .collect();
         assert_eq!(items.len(), 1);
         trash::os_limited::restore_all(items).unwrap();
