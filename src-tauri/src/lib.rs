@@ -1757,8 +1757,9 @@ mod tests {
             .unwrap()
             .into_iter()
             .filter(|item| {
-                item.name == "recycle-fixture.mp4"
-                    && fs::canonicalize(&item.original_parent).ok().as_ref() == Some(&parent)
+                // Shell display names can omit known extensions. The unique
+                // fixture directory identifies this item regardless of Explorer settings.
+                fs::canonicalize(&item.original_parent).ok().as_ref() == Some(&parent)
             })
             .collect();
         assert_eq!(items.len(), 1);
