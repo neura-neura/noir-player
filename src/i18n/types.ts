@@ -112,6 +112,16 @@ export type AppMessages = {
     unavailable: string;
     current: string;
     play: string;
+    renameVideo: string;
+    renameLabel: string;
+    renameDescription: string;
+    renameSave: string;
+    renaming: string;
+    renamed: (fileName: string) => string;
+    renameInvalidName: string;
+    renameExists: string;
+    renameInUse: string;
+    renameFailed: string;
     deleteVideo: string;
     deleteTitle: string;
     deleteDescription: string;

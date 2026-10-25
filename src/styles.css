@@ -1211,7 +1211,7 @@ body:has(.app-shell-native-fullscreen),
   color: #eef5fb;
   padding: 4px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 44px;
+  grid-template-columns: minmax(0, 1fr) 44px 44px;
   align-items: center;
   gap: 4px;
   text-align: left;
@@ -1230,7 +1230,7 @@ body:has(.app-shell-native-fullscreen),
   min-width: 0;
   min-height: 48px;
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr) auto;
+  grid-template-columns: 36px minmax(0, 1fr);
   align-items: center;
   gap: 8px;
   padding: 4px 6px;
@@ -1240,6 +1240,42 @@ body:has(.app-shell-native-fullscreen),
   color: inherit;
   text-align: left;
 }
+.playlist-rename-button {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: #dff7ff;
+}
+.playlist-rename-button:hover { background: rgba(111, 225, 255, 0.12); }
+.playlist-rename-editor {
+  grid-column: 1 / -1;
+  min-width: 0;
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+}
+.playlist-rename-editor label { font-size: 0.85rem; }
+.playlist-rename-editor small { color: rgba(232, 240, 250, 0.8); overflow-wrap: anywhere; }
+.playlist-rename-controls { display: flex; align-items: center; gap: 4px; }
+.playlist-rename-controls input {
+  width: 0;
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(111, 225, 255, 0.45);
+  background: rgba(0, 0, 0, 0.2);
+  color: inherit;
+  font: inherit;
+}
+.playlist-rename-controls button { flex-shrink: 0; }
+.playlist-rename-extension { font-size: 0.8rem; }
 .playlist-delete-button {
   position: relative;
   isolation: isolate;
@@ -1269,6 +1305,8 @@ body:has(.app-shell-native-fullscreen),
 }
 .playlist-delete-button:hover { background: rgba(255, 100, 100, 0.14); }
 .playlist-play-button:focus-visible,
+.playlist-rename-button:focus-visible,
+.playlist-rename-editor input:focus-visible,
 .playlist-delete-button:focus-visible,
 .delete-video-dialog :focus-visible { outline: 2px solid #6fe1ff; outline-offset: 2px; }
 .playlist-item button:disabled { opacity: 0.5; cursor: wait; }
@@ -1350,15 +1388,7 @@ body:has(.app-shell-native-fullscreen),
   font-size: 0.78rem;
 }
 
-.playlist-action {
-  justify-self: end;
-  border-radius: 999px;
-  padding: 5px 9px;
-  background: rgba(111, 225, 255, 0.12);
-  color: #dff7ff;
-  font-size: 0.78rem;
-  white-space: nowrap;
-}
+
 
 .sync-editor input[type='number'],
 .text-input,

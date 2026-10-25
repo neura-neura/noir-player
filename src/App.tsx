@@ -7,12 +7,14 @@ import DOMPurify from 'dompurify';
 import { SubtitleStyleLibrary, subtitleStyleCopy } from '@/app/SubtitleStyleLibrary';
 import { DeleteVideoDialog } from '@/app/DeleteVideoDialog';
 import { DeleteVideoButton } from '@/app/DeleteVideoButton';
+import { RenameVideoEditor } from '@/app/RenameVideoEditor';
 import { DEFAULT_STYLE, DEFAULT_FONT_STYLESHEET_URL, normalizeSubtitleStyle, type SubtitleStyle, type SubtitleStyleSnapshot } from '@/lib/subtitle-styles';
 import type Hls from 'hls.js';
 import {
   Maximize2,
   Minimize2,
   Pause,
+  Pencil,
   Play,
   Volume2,
   VolumeX,
@@ -93,6 +95,7 @@ type VideoOpenOptions = {
   playOnReady?: boolean;
   applyOpenPreferences?: boolean;
   preservePlaybackState?: PlaybackStateSnapshot;
+  resumePosition?: number;
 };
 
 type SubtitleSelectionOptions = {
@@ -940,6 +943,10 @@ export default function App() {
   const [playlistRefreshRevision, setPlaylistRefreshRevision] = useState(0);
   const [deleteTarget, setDeleteTarget] = useState<PlaylistVideo | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<PlaylistVideo | null>(null);
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const playlistBusy = deleteBusy || renameBusy;
   const [deleteError, setDeleteError] = useState(false);
   const deleteBusyRef = useRef(false);
   const [subtitleTrack, setSubtitleTrack] = useState<SubtitleTrack | null>(
@@ -1088,6 +1095,7 @@ export default function App() {
   });
   const playOnReadyRef = useRef(false);
   const applyOpenPreferencesRef = useRef(true);
+  const resumePositionRef = useRef<number | undefined>(undefined);
   const preservedPlaybackStateRef = useRef<PlaybackStateSnapshot | null>(null);
   const videoReadyPanelBehaviorRef =
     useRef<VideoReadyPanelBehavior | null>(null);
@@ -1564,6 +1572,7 @@ export default function App() {
       (shouldApplyOpenPreferences ? storedAutoplayOnOpen : false);
     applyOpenPreferencesRef.current = shouldApplyOpenPreferences;
     preservedPlaybackStateRef.current = options?.preservePlaybackState ?? null;
+    resumePositionRef.current = options?.resumePosition;
     setSubtitleDropActive(false);
     if (!rememberSyncOffset) {
       setSyncOffsetMs(0);
@@ -1651,6 +1660,7 @@ export default function App() {
       playOnReady: playOnReadyRef.current,
       applyOpenPreferences: applyOpenPreferencesRef.current,
       preservePlaybackState: preservedPlaybackState,
+      resumePosition: resumePositionRef.current,
     };
 
     setNotice(messages.notices.nativeMpvUnavailable);
@@ -1951,7 +1961,7 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [mpvStatus, videoSource?.fileName, videoSource?.kind, videoSource?.path]);
+  }, [mpvStatus, videoSource]);
 
   useEffect(() => {
     if (
@@ -2040,6 +2050,11 @@ export default function App() {
           : shouldForcePlayOnReady ||
             (shouldApplyOpenPreferences && autoplayOnOpen);
 
+      if (resumePositionRef.current !== undefined) {
+        const position = resumePositionRef.current;
+        resumePositionRef.current = undefined;
+        await mpvCommand('seek', [position, 'absolute+exact']);
+      }
       await setMpvProperty('pause', !shouldPlayOnReady);
       if (shouldPlayOnReady) {
         await new Promise((resolve) => window.setTimeout(resolve, 0));
@@ -2676,7 +2691,7 @@ export default function App() {
 
     const handlePlaybackSpaceShortcut = (event: KeyboardEvent) => {
       if (document.querySelector('.delete-video-dialog[open]')) return;
-      if (event.target instanceof Element && event.target.closest('.playlist-delete-button')) return;
+      if (event.target instanceof Element && event.target.closest('.playlist-delete-button, .playlist-rename-button')) return;
       if (!shouldHandlePlaybackSpace(event)) {
         return;
       }
@@ -3484,6 +3499,62 @@ export default function App() {
           ? error.message
           : messages.notices.diskReadFailed(getBaseName(path)),
       );
+    }
+  }
+
+  function focusRenameButton(path: string) {
+    window.requestAnimationFrame(() => {
+      const buttons = document.querySelectorAll<HTMLButtonElement>('.playlist-rename-button[data-path]');
+      Array.from(buttons).find((button) => button.dataset.path === path)?.focus();
+    });
+  }
+
+  async function renamePlaylistVideo(target: PlaylistVideo, name: string) {
+    if (deleteBusyRef.current) return;
+    if (name === target.fileName.slice(0, target.fileName.lastIndexOf('.'))) {
+      setRenameTarget(null);
+      focusRenameButton(target.path);
+      return;
+    }
+    // Share the file-operation lock with recycling and source changes.
+    deleteBusyRef.current = true;
+    setRenameBusy(true);
+    setRenameError(null);
+    const renamingActive = areFilePathsEqual(target.path, currentVideoPathRef.current);
+    const options: VideoOpenOptions = {
+      panelTab: 'playlist', panelVisible: true,
+      playOnReady: !(isNativeMpvSource ? mpvPaused : videoElementRef.current?.paused ?? true),
+      applyOpenPreferences: false,
+      preservePlaybackState: capturePlaybackState(),
+      resumePosition: isNativeMpvSource ? mpvTimePos : videoElementRef.current?.currentTime ?? 0,
+    };
+    let renamed: PlaylistVideo | null = null;
+    try {
+      if (renamingActive) {
+        playOnReadyRef.current = false;
+        if (isNativeMpvSource) await mpvCommand('stop');
+        resetMediaElementBeforeSourceSwap();
+      }
+      const result = await invoke<PlaylistVideo>('rename_video', { path: target.path, name });
+      renamed = result;
+      setPlaylistVideos((videos) => videos.map((video) =>
+        areFilePathsEqual(video.path, target.path) ? result : video));
+      deleteBusyRef.current = false;
+      if (renamingActive) await openVideoFromPath(renamed.path, options);
+      setPlaylistRefreshRevision((revision) => revision + 1);
+      setRenameTarget(null);
+      setNotice(messages.playlist.renamed(renamed.fileName));
+      pushToast(messages.playlist.renamed(renamed.fileName));
+      focusRenameButton(renamed.path);
+    } catch (error) {
+      const copy = messages.playlist;
+      setRenameError(error === 'exists' ? copy.renameExists : error === 'invalidName'
+        ? copy.renameInvalidName : error === 'inUse' ? copy.renameInUse : copy.renameFailed);
+      deleteBusyRef.current = false;
+      if (renamingActive && !renamed) await openVideoFromPath(target.path, options);
+    } finally {
+      deleteBusyRef.current = false;
+      setRenameBusy(false);
     }
   }
 
@@ -4682,7 +4753,10 @@ export default function App() {
     return () => {
       active = false;
       setBrowserControls(null);
-      playerRef.current?.destroy();
+      playerRef.current?.destroy(function (this: HTMLElement) {
+        // Plyr restores a clone on destroy; retain the video node owned by React.
+        this.replaceWith(videoElement);
+      });
       playerRef.current = null;
     };
   }, [videoSource?.kind, videoSource]);
@@ -4897,6 +4971,10 @@ export default function App() {
     };
 
     const handleLoadedMetadata = () => {
+      if (resumePositionRef.current !== undefined) {
+        videoElement.currentTime = resumePositionRef.current;
+        resumePositionRef.current = undefined;
+      }
       const preservedPlaybackState = preservedPlaybackStateRef.current;
       if (preservedPlaybackState) {
         videoElement.volume = preservedPlaybackState.volume;
@@ -5889,25 +5967,33 @@ export default function App() {
                                   isActive ? 'playlist-item-active' : ''
                                 }`}
                               >
-                                <button type='button' className='playlist-play-button'
-                                  title={playlistVideo.path} aria-current={isActive ? 'true' : undefined}
-                                  disabled={deleteBusy} onClick={() => void playPlaylistVideo(playlistVideo)}>
-                                <span className='playlist-index'>
-                                  {String(index + 1).padStart(2, '0')}
-                                </span>
-                                <span className='playlist-item-main'>
-                                  <strong>{playlistVideo.fileName}</strong>
-                                  {isActive ? (
-                                    <small>{messages.playlist.current}</small>
-                                  ) : null}
-                                </span>
-                                <span className='playlist-action'>
-                                  {messages.playlist.play}
-                                </span>
-                                </button>
-                                <DeleteVideoButton fileName={playlistVideo.fileName} messages={messages.playlist}
-                                  disabled={deleteBusy} onRequest={() => requestDeleteVideo(playlistVideo)}
-                                  onHold={() => void deletePlaylistVideo(playlistVideo)} />
+                                {renameTarget?.path === playlistVideo.path ? (
+                                  <RenameVideoEditor fileName={playlistVideo.fileName} messages={messages.playlist}
+                                    busy={renameBusy} error={renameError}
+                                    onCancel={() => { setRenameTarget(null); setRenameError(null); focusRenameButton(playlistVideo.path); }}
+                                    onSave={(name) => void renamePlaylistVideo(playlistVideo, name)} />
+                                ) : (
+                                  <>
+                                    <button type='button' className='playlist-play-button'
+                                      title={playlistVideo.path} aria-current={isActive ? 'true' : undefined}
+                                      disabled={playlistBusy} onClick={() => void playPlaylistVideo(playlistVideo)}>
+                                      <span className='playlist-index'>{String(index + 1).padStart(2, '0')}</span>
+                                      <span className='playlist-item-main'>
+                                        <strong>{playlistVideo.fileName}</strong>
+                                        {isActive ? <small>{messages.playlist.current}</small> : null}
+                                      </span>
+                                    </button>
+                                    <button type='button' className='playlist-rename-button' data-path={playlistVideo.path}
+                                      title={messages.playlist.renameVideo}
+                                      aria-label={`${messages.playlist.renameVideo}: ${playlistVideo.fileName}`}
+                                      disabled={playlistBusy} onClick={() => { setRenameError(null); setRenameTarget(playlistVideo); }}>
+                                      <Pencil size={18} aria-hidden='true' />
+                                    </button>
+                                    <DeleteVideoButton fileName={playlistVideo.fileName} messages={messages.playlist}
+                                      disabled={playlistBusy} onRequest={() => requestDeleteVideo(playlistVideo)}
+                                      onHold={() => void deletePlaylistVideo(playlistVideo)} />
+                                  </>
+                                )}
                               </div>
                             );
                           })}

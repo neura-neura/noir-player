@@ -1094,6 +1094,90 @@ async fn recycle_video(path: String) -> Result<(), String> {
     .map_err(|error| error.to_string())?
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+enum RenameVideoError {
+    InvalidName,
+    Exists,
+    InUse,
+    Failed,
+}
+
+fn rename_video_file(path: &Path, name: &str) -> Result<PlaylistVideo, RenameVideoError> {
+    validate_recyclable_video(path).map_err(|_| RenameVideoError::Failed)?;
+    let device = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    if name.is_empty()
+        || name.trim() != name
+        || name.ends_with('.')
+        || name
+            .chars()
+            .any(|c| c.is_control() || r#"<>:"/\|?*"#.contains(c))
+        || ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"].contains(&device.as_str())
+        || (device.starts_with("COM") || device.starts_with("LPT"))
+            && ["1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³"].contains(&&device[3..])
+    {
+        return Err(RenameVideoError::InvalidName);
+    }
+    let extension = path.extension().ok_or(RenameVideoError::Failed)?;
+    let mut file_name = std::ffi::OsString::from(name);
+    file_name.push(".");
+    file_name.push(extension);
+    let destination = path.with_file_name(&file_name);
+    if destination != path {
+        rename_without_replacing(path, &destination).map_err(|error| {
+            match error.raw_os_error() {
+                Some(80 | 183) => RenameVideoError::Exists,
+                Some(5 | 32 | 33) => RenameVideoError::InUse,
+                Some(123 | 206) => RenameVideoError::InvalidName,
+                _ if error.kind() == std::io::ErrorKind::AlreadyExists => RenameVideoError::Exists,
+                _ => RenameVideoError::Failed,
+            }
+        })?;
+    }
+    Ok(PlaylistVideo {
+        path: destination.to_string_lossy().into_owned(),
+        file_name: file_name.to_string_lossy().into_owned(),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn rename_without_replacing(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    }
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // Flags = 0 makes a collision fail atomically instead of replacing another file.
+    if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 0) } == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn rename_without_replacing(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::hard_link(source, destination)?;
+    if let Err(error) = fs::remove_file(source) {
+        let _ = fs::remove_file(destination);
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn rename_video(path: String, name: String) -> Result<PlaylistVideo, RenameVideoError> {
+    tauri::async_runtime::spawn_blocking(move || rename_video_file(Path::new(&path), &name))
+        .await
+        .map_err(|_| RenameVideoError::Failed)?
+}
+
 fn probe_video_duration_seconds(app: &AppHandle, path: &str) -> Result<f64, String> {
     let ffprobe_path = resolve_binary_path(app, "ffprobe.exe");
     let output = hidden_command(ffprobe_path)
@@ -1663,6 +1747,7 @@ pub fn run() {
             list_system_fonts,
             list_folder_videos,
             recycle_video,
+            rename_video,
             prepare_hls_stream,
             prepare_video_playback_source,
             list_embedded_subtitle_streams,
@@ -1714,6 +1799,87 @@ mod tests {
         assert!(!is_supported_external_subtitle_extension(OsStr::new("mp4")));
         assert!(is_transport_stream_path("episode.M2TS"));
         assert!(!is_transport_stream_path("episode.mp4"));
+    }
+
+    #[test]
+    fn renaming_preserves_extension_and_never_overwrites_files() {
+        let suffix = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("noir-rename-{suffix}"));
+        fs::create_dir(&directory).unwrap();
+        let source = directory.join("original.MKV");
+        let existing = directory.join("existing.MKV");
+        fs::write(&source, b"video fixture").unwrap();
+        fs::write(&existing, b"keep this file").unwrap();
+        for name in [
+            "",
+            " ",
+            "../escape",
+            "a/b",
+            "a\\b",
+            "bad:name",
+            "trailing.",
+            "trailing ",
+            "CON",
+            "com1",
+            "LPT9.test",
+        ] {
+            assert!(matches!(
+                rename_video_file(&source, name),
+                Err(RenameVideoError::InvalidName)
+            ));
+            assert!(source.exists());
+        }
+        assert!(matches!(
+            rename_video_file(&source, "existing"),
+            Err(RenameVideoError::Exists)
+        ));
+        assert_eq!(fs::read(&existing).unwrap(), b"keep this file");
+        let renamed = rename_video_file(&source, "renamed video 日本語").unwrap();
+        assert_eq!(renamed.file_name, "renamed video 日本語.MKV");
+        assert!(!source.exists());
+        assert_eq!(fs::read(&renamed.path).unwrap(), b"video fixture");
+        #[cfg(target_os = "windows")]
+        {
+            let changed_case =
+                rename_video_file(Path::new(&renamed.path), "RENAMED VIDEO 日本語").unwrap();
+            assert_eq!(changed_case.file_name, "RENAMED VIDEO 日本語.MKV");
+            fs::remove_file(changed_case.path).unwrap();
+        }
+        #[cfg(not(target_os = "windows"))]
+        fs::remove_file(renamed.path).unwrap();
+        fs::remove_file(existing).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn renaming_locked_files_keeps_the_original() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let suffix = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("noir-rename-lock-{suffix}"));
+        fs::create_dir(&directory).unwrap();
+        let source = directory.join("locked.mp4");
+        fs::write(&source, b"fixture").unwrap();
+        let locked = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&source)
+            .unwrap();
+        assert!(matches!(
+            rename_video_file(&source, "new"),
+            Err(RenameVideoError::InUse)
+        ));
+        assert!(source.exists());
+        assert!(!directory.join("new.mp4").exists());
+        drop(locked);
+        fs::remove_file(source).unwrap();
+        fs::remove_dir(directory).unwrap();
     }
 
     #[test]
